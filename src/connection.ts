@@ -1,6 +1,13 @@
 import WebSocket from "ws";
 import { createLogger } from "./logger";
-import { OCPP_MSG_CALL, OCPP_SUBPROTOCOLS } from "./types";
+import {
+  OCPP_MSG_CALL,
+  OCPP_MSG_CALLERROR,
+  OCPP_MSG_CALLRESULT,
+  OCPP_SUBPROTOCOLS,
+  type OcppMessageType,
+  type ParsedMessage,
+} from "./types";
 
 /**
  * Manages the full lifecycle of a single charger connection:
@@ -8,8 +15,8 @@ import { OCPP_MSG_CALL, OCPP_SUBPROTOCOLS } from "./types";
  *   Charger  ←─→  Proxy  ←─→  Primary CSMS
  *                         ──→  Secondary CSMS (mirror, one-way)
  *
- * - Messages from the charger are forwarded to the primary and mirrored
- *   to all secondaries.
+ * - All messages from the charger are forwarded to the primary; only
+ *   CALL messages are mirrored to secondaries.
  * - Only the primary CSMS can send commands back to the charger.
  * - Secondary connections are best-effort; failures never affect the
  *   charger or the primary link. Secondaries auto-reconnect, send
@@ -43,7 +50,7 @@ const SECONDARY_MAX_QUEUE = 100;
 interface SecondaryState {
   url: string;
   ws: WebSocket | null;
-  queue: string[];
+  queue: ParsedMessage[];
   keepalive: ReturnType<typeof setInterval> | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   lastPongAt: number;
@@ -86,21 +93,18 @@ export class ChargerConnection {
 
     this.charger.on("message", (data) => {
       const raw = data.toString();
-      this.log.debug("charger → proxy", { message: this.summarise(raw) });
+      const msg = this.decode(raw);
+      this.log.debug("charger → proxy", { message: this.summarise(msg || raw) });
 
       if (this.primary?.readyState === WebSocket.OPEN) {
         this.primary.send(raw);
       }
 
-      for (const sec of this.secondaries) {
-        if (sec.ws?.readyState === WebSocket.OPEN) {
-          try {
-            sec.ws.send(raw);
-          } catch {
-            /* best-effort */
+      if (msg?.type === OCPP_MSG_CALL) {
+        for (const sec of this.secondaries) {
+          if (!this.sendToSecondary(sec, msg)) {
+            this.enqueueForSecondary(sec, msg);
           }
-        } else {
-          this.enqueueForSecondary(sec, raw);
         }
       }
     });
@@ -157,7 +161,8 @@ export class ChargerConnection {
 
     ws.on("message", (data) => {
       const raw = data.toString();
-      this.log.debug("primary → charger", { message: this.summarise(raw) });
+      const msg = this.decode(raw);
+      this.log.debug("primary → charger", { message: this.summarise(msg || raw) });
       if (this.charger.readyState === WebSocket.OPEN) {
         this.charger.send(raw);
       }
@@ -208,7 +213,7 @@ export class ChargerConnection {
     ws.on("open", () => {
       this.log.info("secondary connected", { url });
       state.lastPongAt = Date.now();
-      this.flushSecondaryQueue(state, ws);
+      this.flushSecondaryQueue(state);
       this.startSecondaryKeepalive(state, ws);
     });
 
@@ -218,9 +223,10 @@ export class ChargerConnection {
         state.lastPongAt = Date.now();
         return;
       }
+      const msg = this.decode(raw);
       this.log.debug("secondary response (ignored)", {
         url,
-        message: this.summarise(raw),
+        message: this.summarise(msg || raw),
       });
     });
 
@@ -245,7 +251,18 @@ export class ChargerConnection {
     return ws;
   }
 
-  private enqueueForSecondary(state: SecondaryState, raw: string) {
+  private sendToSecondary(state: SecondaryState, msg: ParsedMessage): boolean {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.log.debug("proxy → secondary", { url: state.url, message: this.summarise(msg) });
+      state.ws.send(this.serialize(msg));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private enqueueForSecondary(state: SecondaryState, msg: ParsedMessage) {
     if (state.queue.length >= SECONDARY_MAX_QUEUE) {
       state.queue.shift();
       this.log.warn("secondary queue full, dropping oldest message", {
@@ -253,21 +270,17 @@ export class ChargerConnection {
         max: SECONDARY_MAX_QUEUE,
       });
     }
-    state.queue.push(raw);
+    state.queue.push(msg);
   }
 
-  private flushSecondaryQueue(state: SecondaryState, ws: WebSocket) {
+  private flushSecondaryQueue(state: SecondaryState) {
     if (state.queue.length === 0) return;
     this.log.info("secondary flushing queued messages", {
       url: state.url,
       count: state.queue.length,
     });
     for (const msg of state.queue) {
-      try {
-        ws.send(msg);
-      } catch {
-        /* best-effort */
-      }
+      this.sendToSecondary(state, msg);
     }
     state.queue = [];
   }
@@ -351,21 +364,45 @@ export class ChargerConnection {
     this.endCallback?.();
   }
 
-  /** Return a short summary string for logging (avoids dumping huge payloads). */
-  private summarise(raw: string): string {
+  /** Parse a raw WebSocket frame into a structured OCPP message, or null if the frame is not valid OCPP JSON. */
+  private decode(raw: string): ParsedMessage | null {
     try {
-      const msg = JSON.parse(raw) as unknown[];
-      if (!Array.isArray(msg) || msg.length < 3) return raw.slice(0, 120);
-
-      const type = msg[0] as number;
-      const id = msg[1] as string;
-
+      const arr = JSON.parse(raw) as unknown[];
+      if (!Array.isArray(arr) || arr.length < 3) return null;
+      const type = arr[0] as OcppMessageType;
+      const id = arr[1] as string;
       if (type === OCPP_MSG_CALL) {
-        return `[CALL] ${msg[2]} (${id})`;
+        return { type, id, action: arr[2] as string, payload: arr[3] };
       }
-      return `[${type === 3 ? "RESULT" : "ERROR"}] (${id})`;
+      if (type === OCPP_MSG_CALLRESULT) {
+        return { type, id, payload: arr[2] };
+      }
+      if (type === OCPP_MSG_CALLERROR) {
+        return { type, id, errorCode: arr[2] as string, errorDescription: arr[3] as string, errorDetails: arr[4] };
+      }
+      return null;
     } catch {
-      return raw.slice(0, 120);
+      return null;
     }
+  }
+
+  private serialize(msg: ParsedMessage): string {
+    if (msg.type === OCPP_MSG_CALL) return JSON.stringify([msg.type, msg.id, msg.action, msg.payload ?? {}]);
+    if (msg.type === OCPP_MSG_CALLRESULT) return JSON.stringify([msg.type, msg.id, msg.payload ?? {}]);
+    return JSON.stringify([msg.type, msg.id, msg.errorCode, msg.errorDescription, msg.errorDetails ?? {}]);
+  }
+
+  /** Return a short human-readable label for logging. Accepts a parsed message or a raw string fallback. */
+  private summarise(msg: ParsedMessage | string): string {
+    if (typeof msg === "string") return msg.slice(0, 120);
+    if (msg.type === OCPP_MSG_CALL) {
+      const detail = JSON.stringify(msg.payload ?? {}).slice(0, 120);
+      return `[CALL] ${msg.action} (${msg.id}) ${detail}`;
+    }
+    if (msg.type === OCPP_MSG_CALLRESULT) {
+      const detail = JSON.stringify(msg.payload ?? {}).slice(0, 120);
+      return `[RESULT] (${msg.id}) ${detail}`;
+    }
+    return `[ERROR] (${msg.id}) ${msg.errorCode}: ${msg.errorDescription}`;
   }
 }

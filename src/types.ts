@@ -17,12 +17,28 @@ export type OcppMessageType =
   | typeof OCPP_MSG_CALLRESULT
   | typeof OCPP_MSG_CALLERROR;
 
-export interface ParsedMessage {
-  type: OcppMessageType;
+export interface CallMessage {
+  type: typeof OCPP_MSG_CALL;
   id: string;
-  raw: string;
-  action?: string;
+  action: string;
+  payload: unknown;
 }
+
+export interface CallResultMessage {
+  type: typeof OCPP_MSG_CALLRESULT;
+  id: string;
+  payload: unknown;
+}
+
+export interface CallErrorMessage {
+  type: typeof OCPP_MSG_CALLERROR;
+  id: string;
+  errorCode: string;
+  errorDescription: string;
+  errorDetails?: unknown;
+}
+
+export type ParsedMessage = CallMessage | CallResultMessage | CallErrorMessage;
 
 /**
  * OCPP WebSocket sub-protocols in preference order.
