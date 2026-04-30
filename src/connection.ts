@@ -61,7 +61,8 @@ export class ChargerConnection {
     private readonly primaryUrl: string,
     private readonly secondaryUrls: string[],
     private readonly protocol: string,
-    private readonly authHeader: string | undefined
+    private readonly authHeader: string | undefined,
+    private readonly endCallback?: () => void
   ) {
     this.log = createLogger(chargePointId);
     this.setup();
@@ -322,7 +323,7 @@ export class ChargerConnection {
     return headers;
   }
 
-  private teardown() {
+  teardown() {
     if (!this.alive) return;
     this.alive = false;
 
@@ -346,6 +347,7 @@ export class ChargerConnection {
     close(this.charger);
 
     this.log.info("session ended");
+    this.endCallback?.();
   }
 
   /** Return a short summary string for logging (avoids dumping huge payloads). */

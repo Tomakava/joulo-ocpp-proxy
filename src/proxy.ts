@@ -16,6 +16,8 @@ const log = createLogger("proxy");
  * The proxy appends the same chargePointId to each upstream CSMS URL.
  */
 export function startProxy(config: Config) {
+  const sessions = new Map<string, ChargerConnection>();
+
   const server = createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end(
@@ -53,14 +55,26 @@ export function startProxy(config: Config) {
       ip: req.socket.remoteAddress,
     });
 
-    new ChargerConnection(
+    // Destroy any existing session for this charger before creating a new one.
+    // Without this, the old primary connection stays open; some CSMS backends
+    // reject the new connection while the old one is still alive, forcing the
+    // charger into a reconnect loop.
+    const existing = sessions.get(chargePointId);
+    if (existing) {
+      log.info("replacing existing session", { chargePointId });
+      existing.teardown();
+    }
+
+    const conn = new ChargerConnection(
       ws,
       chargePointId,
       config.primaryUrl,
       config.secondaryUrls,
       protocol,
-      authHeader
+      authHeader,
+      () => sessions.delete(chargePointId)
     );
+    sessions.set(chargePointId, conn);
   });
 
   wss.on("error", (err) => {
