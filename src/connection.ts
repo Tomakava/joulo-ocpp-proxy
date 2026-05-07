@@ -146,6 +146,7 @@ export class ChargerConnection {
       {
         headers: this.buildHeaders(),
         handshakeTimeout: 10_000,
+        autoPong: false,
       }
     );
 

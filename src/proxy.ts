@@ -26,6 +26,7 @@ export function startProxy(config: Config) {
 
   const wss = new WebSocketServer({
     server,
+    autoPong: false,
     handleProtocols: (protocols) => {
       for (const p of OCPP_SUBPROTOCOLS) {
         if (protocols.has(p)) return p;
