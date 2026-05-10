@@ -1,6 +1,6 @@
 name: "Joulo OCPP Proxy"
-description: "WebSocket proxy for OCPP EV charger traffic. Forwards messages to a primary CSMS and optionally mirrors them to secondary backends."
-version: "1.0.18"
+description: "WebSocket proxy for OCPP EV charger traffic. Forwards messages to a primary CSMS and mirrors them to per-charger secondary backends."
+version: "1.0.19"
 slug: "joulo_ocpp_proxy"
 url: "https://github.com/tomakava/joulo-ocpp-proxy"
 arch:
@@ -13,13 +13,17 @@ ports_description:
   9000/tcp: "OCPP WebSocket proxy port"
 options:
   primary_csms_url: ""
-  secondary_csms: []
+  charger_mappings: []
   log_level: "info"
   log_max_message_length: 120
 schema:
   primary_csms_url: str
-  secondary_csms:
-    - url: str
+  charger_mappings:
+    - secondary_url: str
+      charger_id: str
+      mapped_charger_id: str?
+      password: str?
+      id_tag: str?
   log_level: list(debug|info|warn|error)?
   log_max_message_length: int(1,)?
 startup: application
@@ -27,4 +31,3 @@ boot: auto
 init: false
 homeassistant_api: false
 hassio_api: false
-

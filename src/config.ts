@@ -3,23 +3,34 @@ import { createLogger } from "./logger";
 
 const log = createLogger("config");
 
+export interface SecondaryTarget {
+  url: string;
+  mappedChargerId: string;
+  password?: string;
+  idTag?: string;
+}
+
 export interface Config {
   port: number;
   primaryUrl: string;
-  secondaryUrls: string[];
   logLevel: "debug" | "info" | "warn" | "error";
   logMaxMessageLength: number;
+  secondariesByCharger: Map<string, SecondaryTarget[]>;
 }
 
 const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 
-interface FileSecondary {
-  url: string;
+interface FileChargerMapping {
+  secondary_url: string;
+  charger_id: string;
+  mapped_charger_id?: string;
+  password?: string;
+  id_tag?: string;
 }
 
 interface FileOptions {
   primary_csms_url?: string;
-  secondary_csms?: FileSecondary[];
+  charger_mappings?: FileChargerMapping[];
   log_level?: string;
   log_max_message_length?: number;
 }
@@ -39,6 +50,28 @@ function loadFileOptions(): FileOptions {
   }
 }
 
+function buildSecondariesByCharger(
+  entries: FileChargerMapping[]
+): Map<string, SecondaryTarget[]> {
+  const result = new Map<string, SecondaryTarget[]>();
+  for (const m of entries) {
+    if (!m.secondary_url || !m.charger_id) {
+      log.warn("charger_mappings entry missing secondary_url or charger_id, skipping", { entry: m });
+      continue;
+    }
+    const target: SecondaryTarget = {
+      url: m.secondary_url,
+      mappedChargerId: m.mapped_charger_id || m.charger_id,
+      password: m.password || undefined,
+      idTag: m.id_tag || undefined,
+    };
+    const list = result.get(m.charger_id);
+    if (list) list.push(target);
+    else result.set(m.charger_id, [target]);
+  }
+  return result;
+}
+
 export function loadConfig(): Config {
   const file = loadFileOptions();
 
@@ -48,11 +81,6 @@ export function loadConfig(): Config {
       "PRIMARY_CSMS_URL is required. Set it via the PRIMARY_CSMS_URL environment variable or the addon configuration in Home Assistant."
     );
   }
-
-  const fileSecondaries = file.secondary_csms ?? [];
-  const secondaryUrls: string[] = process.env.SECONDARY_CSMS_URLS
-    ? process.env.SECONDARY_CSMS_URLS.split(",").map((u) => u.trim()).filter(Boolean)
-    : fileSecondaries.map((e) => e.url).filter(Boolean);
 
   const level = (process.env.LOG_LEVEL ?? file.log_level ?? "info").toLowerCase();
   const logLevel = LOG_LEVELS.includes(level as any)
@@ -74,11 +102,13 @@ export function loadConfig(): Config {
       ? Math.floor(rawMaxLen)
       : 120;
 
+  const secondariesByCharger = buildSecondariesByCharger(file.charger_mappings ?? []);
+
   return {
     port,
     primaryUrl,
-    secondaryUrls,
     logLevel,
     logMaxMessageLength,
+    secondariesByCharger,
   };
 }

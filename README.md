@@ -1,6 +1,6 @@
 # joulo-ocpp-proxy
 
-A lightweight **OCPP WebSocket proxy** that sits between your EV chargers and one or more CSMS backends. It forwards all traffic to a **primary CSMS** and optionally mirrors it to **secondary backends** — perfect for monitoring, analytics, or migrating between platforms without reconfiguring your chargers.
+A lightweight **OCPP WebSocket proxy** that sits between your EV chargers and one or more CSMS backends. It forwards all traffic to a **primary CSMS** and mirrors it to **secondary backends** on a per-charger basis — perfect for monitoring, analytics, or migrating between platforms without reconfiguring your chargers.
 
 Built with Node.js and TypeScript. Supports OCPP 1.6 and 2.0.1.
 
@@ -25,9 +25,18 @@ graph LR
 | Direction | Primary CSMS | Secondary CSMS (×N) |
 |---|---|---|
 | Charger → CSMS | ✅ Forwarded | ✅ CALLs mirrored |
-| CSMS → Charger | ✅ Forwarded | ❌ Ignored |
+| CSMS → Charger | ✅ Forwarded | ⚠️ Selected commands only |
 
-The **primary CSMS** has full control — it can send commands like `RemoteStartTransaction` back to the charger. Secondary backends receive a mirrored copy of the charger's CALL messages (boot notifications, meter values, start/stop transactions, etc.); the charger's responses to primary-initiated commands are not mirrored. Anything a secondary sends back is logged and discarded — it never reaches the charger. Secondary connections are best-effort — if one fails, it never affects the charger or the primary link.
+The **primary CSMS** has full control — it can send any command back to the charger. Secondary backends are configured per-charger via `charger_mappings`: a charger is mirrored to a secondary URL only when an explicit mapping exists for that `(charger_id, secondary_url)` pair. Each mapping carries its own mapped charger ID, password, and `id_tag`, so the same secondary backend can be wired to multiple chargers with different identities. Secondaries receive a mirrored copy of all charger messages (boot notifications, meter values, start/stop transactions, etc.). Most secondary responses are discarded, but a small set of diagnostic commands (`TriggerMessage`, `GetConfiguration`) are forwarded to the charger so a secondary can still inspect charger state. Secondary connections are best-effort — if one fails, it never affects the charger or the primary link.
+
+#### Secondary commands forwarded to the charger
+
+| Command | Behaviour |
+|---|---|
+| `TriggerMessage` | Forwarded to charger; response returned to that secondary |
+| `GetConfiguration` | Forwarded to charger; response returned to that secondary |
+| `RemoteStartTransaction` | Acknowledged locally with `Accepted`; idTag saved and substituted into the next `StartTransaction` sent to that secondary |
+| All others | Rejected locally with a `NotSupported` CallError; charger never sees them |
 
 ### Secondary reliability
 
@@ -63,13 +72,18 @@ Go to the app's **Configuration** tab and fill in your settings:
 
 ```yaml
 primary_csms_url: "wss://your-primary-csms.example.com/ocpp"
-secondary_csms:
-  - url: "wss://analytics.example.com/ocpp"
-  - url: "wss://other-backend.example.com/ocpp"
+charger_mappings:
+  - secondary_url: "wss://analytics.example.com/ocpp"
+    charger_id: CHARGER-001
+  - secondary_url: "wss://other-backend.example.com/ocpp"
+    charger_id: CHARGER-001
+    mapped_charger_id: ext-CHARGER-001
+    password: secret123
+    id_tag: HARDCODED-TAG
 log_level: info
 ```
 
-All fields except `primary_csms_url` are optional.
+Only `primary_csms_url` is required. Each entry in `charger_mappings` enables mirroring for one `(charger_id, secondary_url)` pair; `mapped_charger_id`, `password`, and `id_tag` are optional overrides for that secondary. Chargers without any mapping go to the primary only.
 
 **4. Start**
 
@@ -94,9 +108,11 @@ A pre-built image is published automatically to GitHub Container Registry on eve
 docker run -d \
   -p 9000:9000 \
   -e PRIMARY_CSMS_URL=wss://your-primary-csms.example.com/ocpp \
-  -e SECONDARY_CSMS_URLS=wss://analytics.example.com/ocpp \
+  -v $(pwd)/data:/data \
   ghcr.io/joulo-nl/joulo-ocpp-proxy:main
 ```
+
+Secondary mirroring is configured via `charger_mappings` in a JSON config file (see below) — there is no env-var equivalent.
 
 ### Using Docker Compose
 
@@ -127,28 +143,36 @@ Create a `config.json` file (see `config.example.json`) and point the container 
 ```json
 {
   "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
-  "secondary_csms": [
-    { "url": "wss://analytics.example.com/ocpp" },
-    { "url": "wss://other-backend.example.com/ocpp" }
+  "charger_mappings": [
+    {
+      "secondary_url": "wss://analytics.example.com/ocpp",
+      "charger_id": "CHARGER-001"
+    },
+    {
+      "secondary_url": "wss://other-backend.example.com/ocpp",
+      "charger_id": "CHARGER-001",
+      "mapped_charger_id": "ext-CHARGER-001",
+      "password": "secret123",
+      "id_tag": "HARDCODED-TAG"
+    }
   ],
   "log_level": "info"
 }
 ```
 
-### Environment variables
+Each entry in `charger_mappings` declares one `(charger_id, secondary_url)` pair to mirror. `mapped_charger_id`, `password`, and `id_tag` are per-pair overrides for backends that expect a different charger identity than the primary. A charger that has no entries is sent only to the primary.
 
-For simple deployments, environment variables are sufficient:
+### Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `CONFIG_FILE` | No | `/data/options.json` | Path to the JSON config file |
 | `PORT` | No | `9000` | Port the proxy listens on |
 | `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS |
-| `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
 | `LOG_MAX_MESSAGE_LENGTH` | No | `120` | Max chars of an OCPP message body shown in `debug` logs before truncation |
 
-\* Required if not set in the config file. Environment variables take precedence over the config file.
+\* Required if not set in the config file. Environment variables take precedence over the config file. Secondary mirroring requires the JSON config file — there is no env-var equivalent for `charger_mappings`.
 
 ## Charger setup
 
@@ -159,10 +183,10 @@ Before:  wss://your-csms.example.com/ocpp/CHARGER-001
 After:   ws://proxy-host:9000/CHARGER-001
 ```
 
-The proxy appends the charge point ID from the incoming URL to each upstream CSMS URL automatically. If your charger connects to `ws://proxy:9000/CHARGER-001`, the proxy connects to:
+The proxy appends the charge point ID from the incoming URL to the primary CSMS URL automatically. For secondaries, it appends the `mapped_charger_id` from the matching `charger_mappings` entry (or the original `charger_id` if no override is set). If your charger connects to `ws://proxy:9000/CHARGER-001`:
 
-- `wss://your-primary-csms.example.com/ocpp/CHARGER-001`
-- `wss://analytics.example.com/ocpp/CHARGER-001`
+- Primary: `wss://your-primary-csms.example.com/ocpp/CHARGER-001`
+- Each matching secondary: `<secondary_url>/<mapped_charger_id or CHARGER-001>`
 
 ### URL patterns
 

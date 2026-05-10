@@ -66,11 +66,16 @@ export function startProxy(config: Config) {
       existing.teardown();
     }
 
+    const secondaries = config.secondariesByCharger.get(chargePointId) ?? [];
+    if (secondaries.length === 0) {
+      log.info("no secondaries configured for this charger; primary only", { chargePointId });
+    }
+
     const conn = new ChargerConnection(
       ws,
       chargePointId,
       config.primaryUrl,
-      config.secondaryUrls,
+      secondaries,
       protocol,
       authHeader,
       config.logMaxMessageLength,
@@ -87,7 +92,7 @@ export function startProxy(config: Config) {
     log.info("proxy listening", {
       port: config.port,
       primary: config.primaryUrl,
-      secondaries: config.secondaryUrls,
+      mappedChargers: [...config.secondariesByCharger.keys()],
     });
   });
 
