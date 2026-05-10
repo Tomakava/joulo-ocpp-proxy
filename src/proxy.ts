@@ -74,6 +74,7 @@ export function startProxy(config: Config) {
       protocol,
       authHeader,
       config.logMaxMessageLength,
+      config.secondaryChargerMap,
       () => sessions.delete(chargePointId)
     );
     sessions.set(chargePointId, conn);

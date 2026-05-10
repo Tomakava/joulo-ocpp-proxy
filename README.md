@@ -25,9 +25,18 @@ graph LR
 | Direction | Primary CSMS | Secondary CSMS (×N) |
 |---|---|---|
 | Charger → CSMS | ✅ Forwarded | ✅ CALLs mirrored |
-| CSMS → Charger | ✅ Forwarded | ❌ Ignored |
+| CSMS → Charger | ✅ Forwarded | ⚠️ Selected commands only |
 
-The **primary CSMS** has full control — it can send commands like `RemoteStartTransaction` back to the charger. Secondary backends receive a mirrored copy of the charger's CALL messages (boot notifications, meter values, start/stop transactions, etc.); the charger's responses to primary-initiated commands are not mirrored. Anything a secondary sends back is logged and discarded — it never reaches the charger. Secondary connections are best-effort — if one fails, it never affects the charger or the primary link.
+The **primary CSMS** has full control — it can send any command back to the charger. Secondary backends receive a mirrored copy of all charger messages (boot notifications, meter values, start/stop transactions, etc.). Most secondary responses are discarded, but a small set of diagnostic commands (`TriggerMessage`, `GetConfiguration`) are forwarded to the charger so a secondary can still inspect charger state. Secondary connections are best-effort — if one fails, it never affects the charger or the primary link.
+
+#### Secondary commands forwarded to the charger
+
+| Command | Behaviour |
+|---|---|
+| `TriggerMessage` | Forwarded to charger; response returned to that secondary |
+| `GetConfiguration` | Forwarded to charger; response returned to that secondary |
+| `RemoteStartTransaction` | Acknowledged locally with `Accepted`; idTag saved and substituted into the next `StartTransaction` sent to that secondary |
+| All others | Rejected locally with a `NotSupported` CallError; charger never sees them |
 
 ### Secondary reliability
 
@@ -66,10 +75,15 @@ primary_csms_url: "wss://your-primary-csms.example.com/ocpp"
 secondary_csms:
   - url: "wss://analytics.example.com/ocpp"
   - url: "wss://other-backend.example.com/ocpp"
+    charger_map:
+      - charger_id: CHARGER-001
+        mapped_charger_id: ext-CHARGER-001
+        password: secret123
+        id_tag: HARDCODED-TAG
 log_level: info
 ```
 
-All fields except `primary_csms_url` are optional.
+All fields except `primary_csms_url` are optional. `charger_map` inside a secondary entry is only needed when that backend expects a different charger ID, password, or `id_tag` than the primary.
 
 **4. Start**
 
@@ -128,16 +142,30 @@ Create a `config.json` file (see `config.example.json`) and point the container 
 {
   "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
   "secondary_csms": [
-    { "url": "wss://analytics.example.com/ocpp" },
-    { "url": "wss://other-backend.example.com/ocpp" }
+    {
+      "url": "wss://analytics.example.com/ocpp"
+    },
+    {
+      "url": "wss://other-backend.example.com/ocpp",
+      "charger_map": [
+        {
+          "charger_id": "CHARGER-001",
+          "mapped_charger_id": "ext-CHARGER-001",
+          "password": "secret123",
+          "id_tag": "HARDCODED-TAG"
+        }
+      ]
+    }
   ],
   "log_level": "info"
 }
 ```
 
+`charger_map` inside a secondary entry is only needed when that backend expects a different charger ID, password, or `id_tag` than the primary.
+
 ### Environment variables
 
-For simple deployments, environment variables are sufficient:
+For simple deployments without charger ID remapping, environment variables are sufficient:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|

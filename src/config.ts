@@ -3,18 +3,29 @@ import { createLogger } from "./logger";
 
 const log = createLogger("config");
 
+export interface SecondaryChargerEntry {
+  chargerId?: string;
+  password?: string;
+  idTag?: string;
+}
+
+// secondaryUrl ? originalChargerId ? { chargerId, password }
+export type SecondaryChargerMap = Map<string, Map<string, SecondaryChargerEntry>>;
+
 export interface Config {
   port: number;
   primaryUrl: string;
   secondaryUrls: string[];
   logLevel: "debug" | "info" | "warn" | "error";
   logMaxMessageLength: number;
+  secondaryChargerMap: SecondaryChargerMap;
 }
 
 const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 
 interface FileSecondary {
   url: string;
+  charger_map?: Array<{ charger_id: string; mapped_charger_id?: string; password?: string; id_tag?: string }>;
 }
 
 interface FileOptions {
@@ -37,6 +48,28 @@ function loadFileOptions(): FileOptions {
     log.error("failed to read config file", { path, error: String(err) });
     return {};
   }
+}
+
+function buildSecondaryChargerMapFromFile(
+  entries: FileSecondary[]
+): SecondaryChargerMap {
+  const result: SecondaryChargerMap = new Map();
+  for (const entry of entries) {
+    if (!entry.url || !entry.charger_map?.length) continue;
+    for (const m of entry.charger_map) {
+      if (!m.charger_id) {
+        log.warn("charger_map entry missing required charger_id, skipping", { url: entry.url, entry: m });
+        continue;
+      }
+      if (!result.has(entry.url)) result.set(entry.url, new Map());
+      result.get(entry.url)!.set(m.charger_id, {
+        chargerId: m.mapped_charger_id || undefined,
+        password: m.password || undefined,
+        idTag: m.id_tag || undefined,
+      });
+    }
+  }
+  return result;
 }
 
 export function loadConfig(): Config {
@@ -74,11 +107,14 @@ export function loadConfig(): Config {
       ? Math.floor(rawMaxLen)
       : 120;
 
+  const secondaryChargerMap = buildSecondaryChargerMapFromFile(fileSecondaries);
+
   return {
     port,
     primaryUrl,
     secondaryUrls,
     logLevel,
     logMaxMessageLength,
+    secondaryChargerMap,
   };
 }

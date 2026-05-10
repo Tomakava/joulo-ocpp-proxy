@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { createLogger } from "./logger";
+import type { SecondaryChargerMap } from "./config";
 import {
   OCPP_MSG_CALL,
   OCPP_MSG_CALLERROR,
@@ -22,6 +23,19 @@ import {
  *   charger or the primary link. Secondaries auto-reconnect, send
  *   periodic keepalive pings, and buffer a small bounded queue of
  *   messages while reconnecting so brief blips don't lose data.
+ * - Each secondary may use a different charger ID (URL path) and
+ *   credentials, configured via the charger_map in the config file.
+ * - OCPP 1.6 StartTransaction assigns a transactionId per-CSMS; the
+ *   proxy maps primary transactionIds to secondary transactionIds so
+ *   MeterValues and StopTransaction reach the correct transaction.
+ * - BootNotification chargePointSerialNumber is rewritten to the mapped
+ *   charger ID when a secondary uses a different identity.
+ * - A hardcoded idTag can be configured per secondary charger (via id_tag in the
+ *   charger_map). When set it is substituted into every StartTransaction mirrored
+ *   to that secondary.
+ * - CALLs from a secondary are either forwarded to the charger (SECONDARY_FORWARDED_ACTIONS),
+ *   rejected with {status:"Rejected"} (SECONDARY_REJECTED_ACTIONS), or rejected with a
+ *   NotSupported CallError for unknown actions.
  */
 
 function forwardPing(ws: WebSocket | null, data: Buffer) {
@@ -47,13 +61,47 @@ const SECONDARY_KEEPALIVE_INTERVAL_MS = 30_000;
 const SECONDARY_PONG_TIMEOUT_MS = 90_000;
 const SECONDARY_MAX_QUEUE = 100;
 
+// CALL actions from a secondary that are forwarded to the charger.
+const SECONDARY_FORWARDED_ACTIONS = new Set(["TriggerMessage", "GetConfiguration"]);
+
+// Known CSMS→charger actions that the proxy refuses to relay.
+// Replied to with a CALLRESULT {status:"Rejected"} so the secondary receives a
+// well-formed OCPP response rather than a generic NotSupported error.
+const SECONDARY_REJECTED_ACTIONS = new Set([
+  "CancelReservation",
+  "ChangeAvailability",
+  "ChangeConfiguration",
+  "ClearCache",
+  "ClearChargingProfile",
+  "DataTransfer",
+  "GetCompositeSchedule",
+  "GetDiagnostics",
+  "GetLocalListVersion",
+  "RemoteStartTransaction",
+  "RemoteStopTransaction",
+  "ReserveNow",
+  "Reset",
+  "SendLocalList",
+  "SetChargingProfile",
+  "UnlockConnector",
+  "UpdateFirmware",
+]);
+
 interface SecondaryState {
   url: string;
+  mappedChargerId: string;
+  password?: string;
   ws: WebSocket | null;
   queue: ParsedMessage[];
   keepalive: ReturnType<typeof setInterval> | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   lastPongAt: number;
+  // primary txId (as string) → secondary txId (as string)
+  txIdMap: Map<string, string>;
+  // msgId → secondary txId, held until the primary txId for that msgId is known
+  pendingSecondaryTxIds: Map<string, string>;
+  // hardcoded idTag from config; substituted into every StartTransaction mirrored to this secondary
+  idTag?: string;
 }
 
 export class ChargerConnection {
@@ -61,6 +109,13 @@ export class ChargerConnection {
   private primary: WebSocket | null = null;
   private secondaries: SecondaryState[] = [];
   private alive = true;
+
+  // Tracks message IDs for in-flight StartTransaction CALLs
+  private pendingStartTxMsgIds = new Set<string>();
+  // msgId → primary-assigned transactionId (string), populated on primary CALLRESULT
+  private primaryTxIdByMsgId = new Map<string, string>();
+  // msgId → secondary that forwarded the CALL to the charger; reply goes back there only
+  private readonly pendingSecondaryCallIds = new Map<string, SecondaryState>();
 
   constructor(
     private readonly charger: WebSocket,
@@ -70,6 +125,7 @@ export class ChargerConnection {
     private readonly protocol: string,
     private readonly authHeader: string | undefined,
     private readonly logMaxMessageLength: number,
+    private readonly secondaryChargerMap: SecondaryChargerMap,
     private readonly endCallback?: () => void
   ) {
     this.log = createLogger(chargePointId);
@@ -80,13 +136,19 @@ export class ChargerConnection {
     this.primary = this.connectPrimary(this.primaryUrl);
 
     for (const url of this.secondaryUrls) {
+      const mapping = this.secondaryChargerMap.get(url)?.get(this.chargePointId);
       const state: SecondaryState = {
         url,
+        mappedChargerId: mapping?.chargerId ?? this.chargePointId,
+        password: mapping?.password,
+        idTag: mapping?.idTag,
         ws: null,
         queue: [],
         keepalive: null,
         reconnectTimer: null,
         lastPongAt: Date.now(),
+        txIdMap: new Map(),
+        pendingSecondaryTxIds: new Map(),
       };
       this.secondaries.push(state);
       state.ws = this.connectSecondary(state);
@@ -97,14 +159,32 @@ export class ChargerConnection {
       const msg = this.decode(raw);
       this.log.debug("charger → proxy", { message: this.summarise(msg || raw) });
 
+      if (msg?.type === OCPP_MSG_CALL && msg.action === "StartTransaction") {
+        this.pendingStartTxMsgIds.add(msg.id);
+      }
+
+      // Route replies to secondary-originated CALLs back to that secondary only.
+      if (msg?.type === OCPP_MSG_CALLRESULT || msg?.type === OCPP_MSG_CALLERROR) {
+        const sec = this.pendingSecondaryCallIds.get(msg.id);
+        if (sec) {
+          this.pendingSecondaryCallIds.delete(msg.id);
+          this.log.debug("charger → secondary", { url: sec.url, message: this.summarise(msg) });
+          if (sec.ws?.readyState === WebSocket.OPEN) {
+            try { sec.ws.send(raw); } catch { /* best-effort */ }
+          }
+          return;
+        }
+      }
+
       if (this.primary?.readyState === WebSocket.OPEN) {
         this.primary.send(raw);
       }
 
       if (msg?.type === OCPP_MSG_CALL) {
         for (const sec of this.secondaries) {
-          if (!this.sendToSecondary(sec, msg)) {
-            this.enqueueForSecondary(sec, msg);
+          const toSend = this.rewriteForSecondary(sec, msg);
+          if (!this.sendToSecondary(sec, toSend)) {
+            this.enqueueForSecondary(sec, toSend);
           }
         }
       }
@@ -150,7 +230,7 @@ export class ChargerConnection {
       url,
       this.protocol ? [this.protocol] : OCPP_SUBPROTOCOLS,
       {
-        headers: this.buildHeaders(),
+        headers: this.buildPrimaryHeaders(),
         handshakeTimeout: 10_000,
         autoPong: false,
       }
@@ -164,6 +244,37 @@ export class ChargerConnection {
       const raw = data.toString();
       const msg = this.decode(raw);
       this.log.debug("primary → charger", { message: this.summarise(msg || raw) });
+
+      // Capture the transactionId assigned by the primary for StartTransaction.
+      // Once known, resolve any secondaries that already responded with their txId.
+      if (msg?.type === OCPP_MSG_CALLRESULT && this.pendingStartTxMsgIds.has(msg.id)) {
+        this.pendingStartTxMsgIds.delete(msg.id);
+        const payload = msg.payload as Record<string, unknown> | null;
+        if (payload?.transactionId !== undefined) {
+          const primaryTxId = String(payload.transactionId);
+          this.primaryTxIdByMsgId.set(msg.id, primaryTxId);
+
+          for (const sec of this.secondaries) {
+            const secTxId = sec.pendingSecondaryTxIds.get(msg.id);
+            if (secTxId !== undefined) {
+              sec.txIdMap.set(primaryTxId, secTxId);
+              sec.pendingSecondaryTxIds.delete(msg.id);
+              this.log.debug("secondary txId mapped (deferred)", {
+                secondary: sec.url,
+                primaryTxId,
+                secondaryTxId: secTxId,
+              });
+            }
+          }
+        }
+      }
+
+      if (msg?.type === OCPP_MSG_CALLERROR && this.pendingStartTxMsgIds.has(msg.id)) {
+        this.pendingStartTxMsgIds.delete(msg.id);
+        this.primaryTxIdByMsgId.delete(msg.id);
+        for (const sec of this.secondaries) sec.pendingSecondaryTxIds.delete(msg.id);
+      }
+
       if (this.charger.readyState === WebSocket.OPEN) {
         this.charger.send(raw);
       }
@@ -195,18 +306,19 @@ export class ChargerConnection {
 
   /**
    * Connect (or reconnect) a secondary CSMS. Secondaries are one-way
-   * mirrors: their responses are logged and discarded. They auto-reconnect
-   * on disconnect/error and send periodic keepalive pings so idle
-   * connections aren't dropped by intermediaries.
+   * mirrors: their responses are logged and discarded (except to extract
+   * transactionIds for OCPP 1.6 mapping). They auto-reconnect on
+   * disconnect/error and send periodic keepalive pings so idle connections
+   * aren't dropped by intermediaries.
    */
   private connectSecondary(state: SecondaryState): WebSocket {
-    const url = `${state.url.replace(/\/+$/, "")}/${this.chargePointId}`;
+    const url = `${state.url.replace(/\/+$/, "")}/${state.mappedChargerId}`;
 
     const ws = new WebSocket(
       url,
       this.protocol ? [this.protocol] : OCPP_SUBPROTOCOLS,
       {
-        headers: this.buildHeaders(),
+        headers: this.buildSecondaryHeaders(state),
         handshakeTimeout: 10_000,
       }
     );
@@ -225,10 +337,47 @@ export class ChargerConnection {
         return;
       }
       const msg = this.decode(raw);
-      this.log.debug("secondary response (ignored)", {
-        url,
+      this.log.debug("secondary → proxy", {
+        url: state.url,
         message: this.summarise(msg || raw),
       });
+
+      if (msg?.type === OCPP_MSG_CALL) {
+        if (SECONDARY_FORWARDED_ACTIONS.has(msg.action ?? "")) {
+          this.pendingSecondaryCallIds.set(msg.id, state);
+          this.log.debug("secondary → charger", { url: state.url, message: this.summarise(msg) });
+          if (this.charger.readyState === WebSocket.OPEN) {
+            try { this.charger.send(raw); } catch { /* best-effort */ }
+          }
+        } else if (SECONDARY_REJECTED_ACTIONS.has(msg.action ?? "")) {
+          this.log.debug("secondary CALL rejected", { url: state.url, action: msg.action });
+          this.replyRejectedToSecondary(state, msg.id);
+        } else {
+          this.replyNotSupportedToSecondary(state, msg.id, msg.action);
+        }
+        return;
+      }
+
+      // Capture the transactionId assigned by this secondary for StartTransaction
+      // so we can rewrite MeterValues / StopTransaction sent later.
+      if (msg?.type === OCPP_MSG_CALLRESULT) {
+        const payload = msg.payload as Record<string, unknown> | null;
+        if (payload?.transactionId !== undefined) {
+          const secondaryTxId = String(payload.transactionId);
+          const primaryTxId = this.primaryTxIdByMsgId.get(msg.id);
+          if (primaryTxId !== undefined) {
+            state.txIdMap.set(primaryTxId, secondaryTxId);
+            this.log.debug("secondary txId mapped", {
+              secondary: state.url,
+              primaryTxId,
+              secondaryTxId,
+            });
+          } else if (this.pendingStartTxMsgIds.has(msg.id)) {
+            // Primary hasn't responded yet; defer until we have the primary txId
+            state.pendingSecondaryTxIds.set(msg.id, secondaryTxId);
+          }
+        }
+      }
     });
 
     ws.on("pong", () => {
@@ -252,6 +401,64 @@ export class ChargerConnection {
     return ws;
   }
 
+  /**
+   * Return the message to send to a secondary, applying any rewrites needed:
+   * - BootNotification: chargePointSerialNumber → mappedChargerId
+   * - StartTransaction: idTag → state.idTag (hardcoded in config, if set)
+   * - MeterValues / StopTransaction: transactionId → secondary-assigned txId
+   * Returns the original message unchanged if no rewrite is needed.
+   */
+  private rewriteForSecondary(state: SecondaryState, msg: ParsedMessage): ParsedMessage {
+    if (msg.type !== OCPP_MSG_CALL || !msg.action || !msg.payload) return msg;
+
+    const action = msg.action;
+    const payload = msg.payload as Record<string, unknown>;
+
+    if (
+      action === "BootNotification" &&
+      state.mappedChargerId !== this.chargePointId &&
+      "chargePointSerialNumber" in payload
+    ) {
+      return {
+        type: OCPP_MSG_CALL,
+        id: msg.id,
+        action,
+        payload: { ...payload, chargePointSerialNumber: state.mappedChargerId },
+      };
+    }
+
+    if (action === "StartTransaction" && state.idTag !== undefined) {
+      return {
+        type: OCPP_MSG_CALL,
+        id: msg.id,
+        action,
+        payload: { ...payload, idTag: state.idTag },
+      };
+    }
+
+    if (action === "MeterValues" || action === "StopTransaction") {
+      const rawTxId = payload.transactionId;
+      if (rawTxId !== undefined) {
+        const key = String(rawTxId);
+        const mapped = state.txIdMap.get(key);
+        if (mapped !== undefined) {
+          if (action === "StopTransaction") state.txIdMap.delete(key);
+          return {
+            type: OCPP_MSG_CALL,
+            id: msg.id,
+            action,
+            payload: {
+              ...payload,
+              transactionId: typeof rawTxId === "number" ? Number(mapped) : mapped,
+            },
+          };
+        }
+      }
+    }
+
+    return msg;
+  }
+
   private sendToSecondary(state: SecondaryState, msg: ParsedMessage): boolean {
     if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return false;
     try {
@@ -261,6 +468,34 @@ export class ChargerConnection {
     } catch {
       return false;
     }
+  }
+
+  /** Acknowledge a secondary's CALL locally with {status: "Accepted"} (no round-trip to the charger). */
+  private replyAcceptedToSecondary(state: SecondaryState, callId: string): boolean {
+    return this.sendToSecondary(state, {
+      type: OCPP_MSG_CALLRESULT,
+      id: callId,
+      payload: { status: "Accepted" },
+    });
+  }
+
+  /** Reject a secondary's CALL with {status:"Rejected"} — used for known but disallowed actions. */
+  private replyRejectedToSecondary(state: SecondaryState, callId: string): boolean {
+    return this.sendToSecondary(state, {
+      type: OCPP_MSG_CALLRESULT,
+      id: callId,
+      payload: { status: "Rejected" },
+    });
+  }
+
+  /** Reject a secondary's CALL locally with a NotSupported CallError — used for unknown actions. */
+  private replyNotSupportedToSecondary(state: SecondaryState, callId: string, action: string): boolean {
+    return this.sendToSecondary(state, {
+      type: OCPP_MSG_CALLERROR,
+      id: callId,
+      errorCode: "NotSupported",
+      errorDescription: `Action '${action}' is not supported by the proxy`,
+    });
   }
 
   private enqueueForSecondary(state: SecondaryState, msg: ParsedMessage) {
@@ -330,9 +565,22 @@ export class ChargerConnection {
     }, SECONDARY_RECONNECT_DELAY_MS);
   }
 
-  private buildHeaders(): Record<string, string> {
+  private buildPrimaryHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.authHeader) {
+      headers["Authorization"] = this.authHeader;
+    }
+    return headers;
+  }
+
+  private buildSecondaryHeaders(state: SecondaryState): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (state.password) {
+      const credentials = Buffer.from(
+        `${state.mappedChargerId}:${state.password}`
+      ).toString("base64");
+      headers["Authorization"] = `Basic ${credentials}`;
+    } else if (this.authHeader) {
       headers["Authorization"] = this.authHeader;
     }
     return headers;
@@ -341,6 +589,8 @@ export class ChargerConnection {
   teardown() {
     if (!this.alive) return;
     this.alive = false;
+
+    this.pendingSecondaryCallIds.clear();
 
     for (const sec of this.secondaries) {
       this.stopSecondaryKeepalive(sec);
