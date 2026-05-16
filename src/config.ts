@@ -8,6 +8,7 @@ export interface Config {
   primaryUrl: string;
   secondaryUrls: string[];
   logLevel: "debug" | "info" | "warn" | "error";
+  logMaxMessageLength: number;
 }
 
 const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
@@ -20,6 +21,7 @@ interface FileOptions {
   primary_csms_url?: string;
   secondary_csms?: FileSecondary[];
   log_level?: string;
+  log_max_message_length?: number;
 }
 
 function loadFileOptions(): FileOptions {
@@ -64,10 +66,19 @@ export function loadConfig(): Config {
     );
   }
 
+  const rawMaxLen = process.env.LOG_MAX_MESSAGE_LENGTH
+    ? parseInt(process.env.LOG_MAX_MESSAGE_LENGTH, 10)
+    : file.log_max_message_length;
+  const logMaxMessageLength =
+    rawMaxLen !== undefined && Number.isFinite(rawMaxLen) && rawMaxLen > 0
+      ? Math.floor(rawMaxLen)
+      : 120;
+
   return {
     port,
     primaryUrl,
     secondaryUrls,
     logLevel,
+    logMaxMessageLength,
   };
 }

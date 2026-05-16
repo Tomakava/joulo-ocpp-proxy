@@ -69,6 +69,7 @@ export class ChargerConnection {
     private readonly secondaryUrls: string[],
     private readonly protocol: string,
     private readonly authHeader: string | undefined,
+    private readonly logMaxMessageLength: number,
     private readonly endCallback?: () => void
   ) {
     this.log = createLogger(chargePointId);
@@ -394,13 +395,14 @@ export class ChargerConnection {
 
   /** Return a short human-readable label for logging. Accepts a parsed message or a raw string fallback. */
   private summarise(msg: ParsedMessage | string): string {
-    if (typeof msg === "string") return msg.slice(0, 120);
+    const max = this.logMaxMessageLength;
+    if (typeof msg === "string") return msg.slice(0, max);
     if (msg.type === OCPP_MSG_CALL) {
-      const detail = JSON.stringify(msg.payload ?? {}).slice(0, 120);
+      const detail = JSON.stringify(msg.payload ?? {}).slice(0, max);
       return `[CALL] ${msg.action} (${msg.id}) ${detail}`;
     }
     if (msg.type === OCPP_MSG_CALLRESULT) {
-      const detail = JSON.stringify(msg.payload ?? {}).slice(0, 120);
+      const detail = JSON.stringify(msg.payload ?? {}).slice(0, max);
       return `[RESULT] (${msg.id}) ${detail}`;
     }
     return `[ERROR] (${msg.id}) ${msg.errorCode}: ${msg.errorDescription}`;

@@ -15,11 +15,13 @@ options:
   primary_csms_url: ""
   secondary_csms: []
   log_level: "info"
+  log_max_message_length: 120
 schema:
   primary_csms_url: str
   secondary_csms:
     - url: str
   log_level: list(debug|info|warn|error)?
+  log_max_message_length: int(1,)?
 startup: application
 boot: auto
 init: false

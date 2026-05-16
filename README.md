@@ -146,6 +146,7 @@ For simple deployments, environment variables are sufficient:
 | `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
+| `LOG_MAX_MESSAGE_LENGTH` | No | `120` | Max chars of an OCPP message body shown in `debug` logs before truncation |
 
 \* Required if not set in the config file. Environment variables take precedence over the config file.
 
