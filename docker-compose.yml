@@ -5,9 +5,12 @@ services:
     ports:
       - "9000:9000"
     volumes:
-      # Mount a config file for structured configuration (recommended).
-      # See config.example.json for all available options.
-      - ./config.json:/data/config.json:ro
+      # Persistent data directory. Holds:
+      #   - config.json (place yours at ./data/config.json — see config.example.json)
+      #   - state.json  (written by the proxy; preserves txIdMap across restarts
+      #                  so MeterValues / StopTransaction continue to map correctly
+      #                  after a restart mid-transaction)
+      - ./data:/data
     environment:
       - PORT=9000
       - CONFIG_FILE=/data/config.json

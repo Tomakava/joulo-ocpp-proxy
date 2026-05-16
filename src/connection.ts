@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { createLogger } from "./logger";
 import type { SecondaryTarget } from "./config";
+import type { StateStore } from "./state";
 import {
   OCPP_MSG_CALL,
   OCPP_MSG_CALLERROR,
@@ -125,6 +126,7 @@ export class ChargerConnection {
     private readonly protocol: string,
     private readonly authHeader: string | undefined,
     private readonly logMaxMessageLength: number,
+    private readonly store: StateStore,
     private readonly endCallback?: () => void
   ) {
     this.log = createLogger(chargePointId);
@@ -145,7 +147,7 @@ export class ChargerConnection {
         keepalive: null,
         reconnectTimer: null,
         lastPongAt: Date.now(),
-        txIdMap: new Map(),
+        txIdMap: this.store.get(this.chargePointId, target.url),
         pendingSecondaryTxIds: new Map(),
       };
       this.secondaries.push(state);
@@ -257,6 +259,7 @@ export class ChargerConnection {
             if (secTxId !== undefined) {
               sec.txIdMap.set(primaryTxId, secTxId);
               sec.pendingSecondaryTxIds.delete(msg.id);
+              this.store.set(this.chargePointId, sec.url, primaryTxId, secTxId);
               this.log.debug("secondary txId mapped (deferred)", {
                 secondary: sec.url,
                 primaryTxId,
@@ -365,6 +368,7 @@ export class ChargerConnection {
           const primaryTxId = this.primaryTxIdByMsgId.get(msg.id);
           if (primaryTxId !== undefined) {
             state.txIdMap.set(primaryTxId, secondaryTxId);
+            this.store.set(this.chargePointId, state.url, primaryTxId, secondaryTxId);
             this.log.debug("secondary txId mapped", {
               secondary: state.url,
               primaryTxId,
@@ -440,7 +444,10 @@ export class ChargerConnection {
         const key = String(rawTxId);
         const mapped = state.txIdMap.get(key);
         if (mapped !== undefined) {
-          if (action === "StopTransaction") state.txIdMap.delete(key);
+          if (action === "StopTransaction") {
+            state.txIdMap.delete(key);
+            this.store.delete(this.chargePointId, state.url, key);
+          }
           return {
             type: OCPP_MSG_CALL,
             id: msg.id,
@@ -588,6 +595,7 @@ export class ChargerConnection {
     if (!this.alive) return;
     this.alive = false;
 
+    this.store.flush();
     this.pendingSecondaryCallIds.clear();
 
     for (const sec of this.secondaries) {
