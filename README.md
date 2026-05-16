@@ -117,8 +117,11 @@ docker run -d \
 ```bash
 git clone https://github.com/joulo-nl/joulo-ocpp-proxy.git
 cd joulo-ocpp-proxy
-cp config.example.json config.json
-# Edit config.json with your CSMS URLs
+mkdir -p data
+cp config.example.json data/config.json
+# Edit data/config.json with your CSMS URLs
+# The container runs as the node user (UID 1000) — make data/ writable:
+sudo chown -R 1000:1000 data
 docker compose up -d
 ```
 
