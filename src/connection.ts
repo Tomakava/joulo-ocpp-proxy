@@ -95,8 +95,12 @@ export class ChargerConnection {
         if (sec.ws?.readyState === WebSocket.OPEN) {
           try {
             sec.ws.send(raw);
-          } catch {
+          } catch (err) {
             /* best-effort */
+            this.log.warn("secondary send failed", {
+              url: sec.url,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         } else {
           this.enqueueForSecondary(sec, raw);
