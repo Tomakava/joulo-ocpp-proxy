@@ -85,6 +85,7 @@ export class ChargerConnection {
 
     this.charger.on("message", (data) => {
       const raw = data.toString();
+      this.log.full("charger → proxy (full)", { message: raw });
       this.log.debug("charger → proxy", { message: this.summarise(raw) });
 
       if (this.primary?.readyState === WebSocket.OPEN) {
@@ -155,6 +156,7 @@ export class ChargerConnection {
 
     ws.on("message", (data) => {
       const raw = data.toString();
+      this.log.full("primary → charger (full)", { message: raw });
       this.log.debug("primary → charger", { message: this.summarise(raw) });
       if (this.charger.readyState === WebSocket.OPEN) {
         this.charger.send(raw);
@@ -216,6 +218,10 @@ export class ChargerConnection {
         state.lastPongAt = Date.now();
         return;
       }
+      this.log.full("secondary response (ignored) (full)", {
+        url,
+        message: raw,
+      });
       this.log.debug("secondary response (ignored)", {
         url,
         message: this.summarise(raw),

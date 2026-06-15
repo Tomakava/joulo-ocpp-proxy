@@ -82,7 +82,7 @@ All configuration is done through environment variables:
 | `PORT` | No | `9000` | Port the proxy listens on |
 | `PRIMARY_CSMS_URL` | **Yes** | — | WebSocket URL of your primary CSMS |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs |
-| `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
+| `LOG_LEVEL` | No | `info` | `full`, `debug`, `info`, `warn`, or `error` |
 
 ## Charger setup
 
@@ -142,9 +142,11 @@ Logs are structured JSON written to stdout/stderr:
 {"time":"2026-04-07T10:00:00.000Z","level":"info","tag":"proxy","msg":"proxy listening","port":9000,"primary":"wss://csms.example.com/ocpp","secondaries":[]}
 {"time":"2026-04-07T10:00:01.000Z","level":"info","tag":"CHARGER-001","msg":"session started","primary":"wss://csms.example.com/ocpp","secondaries":[],"protocol":"ocpp1.6"}
 {"time":"2026-04-07T10:00:01.500Z","level":"debug","tag":"CHARGER-001","msg":"charger → proxy","message":"[CALL] BootNotification (abc123)"}
+{"time":"2026-04-07T10:00:01.501Z","level":"full","tag":"CHARGER-001","msg":"charger → proxy (full)","message":"[\"2\",\"abc123\",\"BootNotification\",{\"chargePointVendor\":\"Acme\"}]"}
 ```
 
-Set `LOG_LEVEL=debug` to see individual OCPP messages.
+Set `LOG_LEVEL=debug` to see summarized OCPP messages.
+Set `LOG_LEVEL=full` to see untruncated request/response payloads for deep troubleshooting.
 
 ## Building the Docker image
 
