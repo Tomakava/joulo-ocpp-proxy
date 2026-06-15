@@ -7,53 +7,23 @@ import {
 
 import { configureLogger, createLogger } from "../../src/logger";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseLogEntry(line: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(line);
-  if (!isRecord(parsed)) {
-    throw new Error("Expected logger output to be a JSON object");
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Expected a JSON log object");
   }
-
-  return parsed;
-}
-
-function getStringProperty(
-  entry: Record<string, unknown>,
-  property: string
-): string {
-  const value = entry[property];
-  if (typeof value !== "string") {
-    throw new Error(`Expected logger output property ${property} to be a string`);
-  }
-
-  return value;
+  return parsed as Record<string, unknown>;
 }
 
 describe("logger", () => {
-  const restoreStreams = () => {
+  const createSink = () => {
     const stdoutEntries: string[] = [];
     const stderrEntries: string[] = [];
 
-    const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-    const originalStderrWrite = process.stderr.write.bind(process.stderr);
-
-    process.stdout.write = (chunk: string | Uint8Array) => {
-      stdoutEntries.push(String(chunk));
-      return true;
-    };
-
-    process.stderr.write = (chunk: string | Uint8Array) => {
-      stderrEntries.push(String(chunk));
-      return true;
-    };
-
     return {
-      restore: () => {
-        process.stdout.write = originalStdoutWrite;
-        process.stderr.write = originalStderrWrite;
+      sink: {
+        stdout: (line: string) => stdoutEntries.push(line),
+        stderr: (line: string) => stderrEntries.push(line),
       },
       stdoutEntries,
       stderrEntries,
@@ -65,79 +35,72 @@ describe("logger", () => {
   });
 
   it("suppresses logs below configured level", () => {
-    const sink = restoreStreams();
-    try {
-      configureLogger({ logLevel: "error" });
-      const logger = createLogger("proxy");
+    const { sink, stdoutEntries, stderrEntries } = createSink();
+    configureLogger({ logLevel: "error", sink });
+    const logger = createLogger("proxy");
 
-      logger.info("info message");
-      logger.error("error message");
+    logger.info("info message");
+    logger.error("error message");
 
-      expect(sink.stdoutEntries).toHaveLength(0);
-      expect(sink.stderrEntries).toHaveLength(1);
-      const entry = parseLogEntry(sink.stderrEntries[0]);
-      expect(getStringProperty(entry, "level")).toBe("error");
-    } finally {
-      sink.restore();
-    }
+    expect(stdoutEntries).toHaveLength(0);
+    expect(stderrEntries).toHaveLength(1);
+    expect(parseLogEntry(stderrEntries[0]).level).toBe("error");
   });
 
-  it("truncates debug message payloads", () => {
-    const sink = restoreStreams();
-    try {
-      configureLogger({ logLevel: "debug", debugMessageMaxLength: 4 });
-      const logger = createLogger("proxy");
+  const longPayload =
+    '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
 
-      logger.debugOcppFrame("charger -> proxy", '[2,"abc","Heartbeat",{}]');
+  it.each([
+    {
+      description: "uses a configured limit",
+      config: { debugMessageMaxLength: 4 },
+      payload: '[2,"abc","Heartbeat",{}]',
+      expectedPayload: '[2,"',
+    },
+    {
+      description: "uses the default limit",
+      config: {},
+      payload: longPayload,
+      expectedPayload: longPayload.slice(0, 120),
+    },
+    {
+      description: "does not truncate when the limit is explicitly undefined",
+      config: { debugMessageMaxLength: undefined },
+      payload: longPayload,
+      expectedPayload: longPayload,
+    },
+  ])(
+      "$description",
+      ({ config, payload, expectedPayload }) => {
+        const { sink, stdoutEntries } = createSink();
+        configureLogger({ logLevel: "debug", sink, ...config });
+        const logger = createLogger("proxy");
 
-      const entry = parseLogEntry(sink.stdoutEntries[0]);
-      expect(getStringProperty(entry, "level")).toBe("debug");
-      expect(getStringProperty(entry, "message")).toContain('[OCPP CALL] (abc):');
-      expect(getStringProperty(entry, "message")).toContain('[2,');
-    } finally {
-      sink.restore();
-    }
-  });
+        logger.debugOcppFrame("charger -> proxy", payload);
 
-  it("truncates debug message payloads by default", () => {
-    const sink = restoreStreams();
-    try {
-      configureLogger({ logLevel: "debug" });
-      const logger = createLogger("proxy");
+        const parsed = parseLogEntry(stdoutEntries[0]);
+        expect(parsed.level).toBe("debug");
+        expect(parsed.message).toBe(
+            "[OCPP CALL] (abc): " + expectedPayload
+        );
+      }
+  );
 
-      const payload = '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
-      logger.debugOcppFrame("charger -> proxy", payload);
+  it("writes logs to a provided sink", () => {
+    const outputSink = createSink();
+    configureLogger({
+      logLevel: "debug",
+      sink: outputSink.sink,
+    });
+    const logger = createLogger("proxy");
 
-      const entry = parseLogEntry(sink.stdoutEntries[0]);
-      const summaryPrefix = "[OCPP CALL] (abc): ";
-      const expectedPayload = payload.slice(0, 120);
+    logger.debug("debug message");
+    logger.info("info message");
+    logger.warn("warn message");
+    logger.error("error message");
 
-      expect(getStringProperty(entry, "level")).toBe("debug");
-      expect(getStringProperty(entry, "message")).toBe(summaryPrefix + expectedPayload);
-    } finally {
-      sink.restore();
-    }
-  });
-
-  it("does not truncate when debugMessageMaxLength is explicitly undefined", () => {
-    const sink = restoreStreams();
-    try {
-      configureLogger({
-        logLevel: "debug",
-        debugMessageMaxLength: undefined,
-      });
-      const logger = createLogger("proxy");
-
-      const payload = '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
-      logger.debugOcppFrame("charger -> proxy", payload);
-
-      const entry = parseLogEntry(sink.stdoutEntries[0]);
-      const summaryPrefix = "[OCPP CALL] (abc): ";
-
-      expect(getStringProperty(entry, "level")).toBe("debug");
-      expect(getStringProperty(entry, "message")).toBe(summaryPrefix + payload);
-    } finally {
-      sink.restore();
-    }
+    expect(outputSink.stdoutEntries).toHaveLength(3);
+    expect(outputSink.stderrEntries).toHaveLength(1);
+    expect(parseLogEntry(outputSink.stderrEntries[0]).level).toBe("error");
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { rawDataToString } from "../../src/websocket";
+import { rawDataToString } from "../../../src/utils/websocket";
 
 describe("rawDataToString", () => {
   it("converts a Buffer", () => {

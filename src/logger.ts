@@ -14,7 +14,24 @@ export const DEFAULT_DEBUG_MESSAGE_MAX_LENGTH = 120;
 export interface LoggerConfig {
   logLevel: LogLevel;
   debugMessageMaxLength?: number;
+  sink?: LoggerSink;
 }
+
+export interface LoggerSink {
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}
+
+const defaultLoggerSink: LoggerSink = {
+  stdout: (line) => {
+    process.stdout.write(line + "\n");
+  },
+  stderr: (line) => {
+    process.stderr.write(line + "\n");
+  },
+};
+
+let loggerSink: LoggerSink = defaultLoggerSink;
 
 export function isLogLevel(value: string): value is LogLevel {
   return (LOG_LEVELS as readonly string[]).includes(value);
@@ -56,10 +73,15 @@ function resolveDebugMessageMaxLength(
   return DEFAULT_DEBUG_MESSAGE_MAX_LENGTH;
 }
 
+function setLoggerSink(sink: LoggerSink): void {
+  loggerSink = sink;
+}
+
 export function configureLogger(config: Partial<LoggerConfig> = {}): void {
-  const { logLevel } = config;
+  const { logLevel, sink } = config;
   setLogLevel(logLevel ?? DEFAULT_LOG_LEVEL);
   setDebugMessageMaxLength(resolveDebugMessageMaxLength(config));
+  setLoggerSink(sink ?? defaultLoggerSink);
 }
 
 function truncateMessage(raw: string): string {
@@ -120,8 +142,8 @@ function log(level: LogLevel, tag: string, message: string, extra?: object) {
 
   const line = JSON.stringify(entry);
 
-  if (level === "error") process.stderr.write(line + "\n");
-  else process.stdout.write(line + "\n");
+  if (level === "error") loggerSink.stderr(line);
+  else loggerSink.stdout(line);
 }
 
 export function createLogger(tag: string) {

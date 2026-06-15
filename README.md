@@ -82,6 +82,8 @@ All configuration is done through environment variables:
 | `PORT` | No | `9000` | Port the proxy listens on |
 | `PRIMARY_CSMS_URL` | **Yes** | — | WebSocket URL of your primary CSMS |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs |
+| `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `PRIMARY_CSMS_URL` |
+| `SECONDARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `SECONDARY_CSMS_URLS` |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
 | `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No | `120` | Max char length for debug payload summaries. Leave empty to disable truncation |
 
@@ -94,9 +96,18 @@ Before:  wss://your-csms.example.com/ocpp/CHARGER-001
 After:   ws://proxy-host:9000/CHARGER-001
 ```
 
-The proxy appends the charge point ID from the incoming URL to each upstream CSMS URL automatically. If your charger connects to `ws://proxy:9000/CHARGER-001`, the proxy connects to:
+The proxy can append the charge point ID from the incoming URL to each upstream CSMS URL.
+
+By default, both primary and secondary URLs append the charge point ID. For CSMS endpoints that use a fixed endpoint URL (for example `wss://fixed-csms.example.com/XXXXXXXX`), set the corresponding toggle to `false`.
+
+If your charger connects to `ws://proxy:9000/CHARGER-001` and appending is enabled, the proxy connects to:
 
 - `wss://your-primary-csms.example.com/ocpp/CHARGER-001`
+- `wss://analytics.example.com/ocpp/CHARGER-001`
+
+With `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID=false` and `SECONDARY_CSMS_APPEND_CHARGE_POINT_ID=true`, this becomes:
+
+- `wss://fixed-csms.example.com/XXXXXXXX`
 - `wss://analytics.example.com/ocpp/CHARGER-001`
 
 ### URL patterns
