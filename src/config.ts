@@ -1,11 +1,12 @@
-import type { LogLevel } from "./logger";
+import type { LoggerConfig } from "./logger";
 import { parseLogLevel } from "./logger";
+import { parsePositiveInteger } from "./env";
 
 export interface Config {
   port: number;
   primaryUrl: string;
   secondaryUrls: string[];
-  logLevel: LogLevel;
+  loggerConfig: LoggerConfig;
 }
 
 export function loadConfig(): Config {
@@ -23,6 +24,10 @@ export function loadConfig(): Config {
     .filter(Boolean);
 
   const logLevel = parseLogLevel(process.env.LOG_LEVEL);
+  const debugMessageMaxLength = parsePositiveInteger(
+    process.env.LOG_DEBUG_MESSAGE_MAX_LENGTH,
+    120
+  );
 
   const portRaw = process.env.PORT ?? "9000";
   const port = parseInt(portRaw, 10);
@@ -36,6 +41,9 @@ export function loadConfig(): Config {
     port,
     primaryUrl,
     secondaryUrls,
-    logLevel,
+    loggerConfig: {
+      logLevel,
+      debugMessageMaxLength,
+    },
   };
 }
