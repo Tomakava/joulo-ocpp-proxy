@@ -55,44 +55,43 @@ function truncateMessage(raw: string): string {
   return raw.slice(0, debugMessageMaxLength);
 }
 
-function summarizeDebugMessage(raw: string): string {
+function summarizeOcppFrame(raw: string): string {
   try {
     const msg = JSON.parse(raw) as unknown[];
     if (!Array.isArray(msg) || msg.length < 3) return truncateMessage(raw);
 
     const type = msg[0] as number;
     const id = String(msg[1]);
+    const payload = truncateMessage(raw);
 
     if (type === OCPP_MSG_CALL) {
-      return `[CALL] ${msg[2]} (${id})`;
+      return `[OCPP CALL] (${id}): ${payload}`;
     }
 
     if (type === OCPP_MSG_CALLRESULT) {
-      return `[RESULT] (${id})`;
+      return `[OCPP RESULT] (${id}): ${payload}`;
     }
 
     if (type === OCPP_MSG_CALLERROR) {
-      return `[ERROR] (${id})`;
+      return `[OCPP ERROR] (${id}): ${payload}`;
     }
 
-    return `[${type}] (${id})`;
+    return `[OCPP UNKNOWN] (${type}): ${payload}`;
   } catch {
     return truncateMessage(raw);
   }
 }
 
-function buildDebugExtra(extra?: object): object | undefined {
-  if (!extra || !Object.hasOwn(extra as Record<string, unknown>, "message")) {
-    return extra;
-  }
+function buildOcppFrameDebugExtra(
+  payload: string,
+  extra?: object
+): object | undefined {
+  if (!extra) return { message: summarizeOcppFrame(payload) };
 
-  const payload = extra as Record<string, unknown>;
-  const message = payload.message;
-  if (typeof message !== "string") return extra;
-
+  const fields = extra as Record<string, unknown>;
   return {
-    ...payload,
-    message: summarizeDebugMessage(message),
+    ...fields,
+    message: summarizeOcppFrame(payload),
   };
 }
 
@@ -115,8 +114,9 @@ function log(level: LogLevel, tag: string, message: string, extra?: object) {
 
 export function createLogger(tag: string) {
   return {
-    debug: (msg: string, extra?: object) =>
-      log("debug", tag, msg, buildDebugExtra(extra)),
+    debug: (msg: string, extra?: object) => log("debug", tag, msg, extra),
+    debugOcppFrame: (msg: string, payload: string, extra?: object) =>
+      log("debug", tag, msg, buildOcppFrameDebugExtra(payload, extra)),
     info: (msg: string, extra?: object) => log("info", tag, msg, extra),
     warn: (msg: string, extra?: object) => log("warn", tag, msg, extra),
     error: (msg: string, extra?: object) => log("error", tag, msg, extra),

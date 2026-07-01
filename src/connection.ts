@@ -85,7 +85,7 @@ export class ChargerConnection {
 
     this.charger.on("message", (data) => {
       const raw = data.toString();
-      this.log.debug("charger → proxy", { message: raw });
+      this.log.debugOcppFrame("charger → proxy", raw);
 
       if (this.primary?.readyState === WebSocket.OPEN) {
         this.primary.send(raw);
@@ -155,7 +155,7 @@ export class ChargerConnection {
 
     ws.on("message", (data) => {
       const raw = data.toString();
-      this.log.debug("primary → charger", { message: raw });
+      this.log.debugOcppFrame("primary → charger", raw);
       if (this.charger.readyState === WebSocket.OPEN) {
         this.charger.send(raw);
       }
@@ -216,10 +216,7 @@ export class ChargerConnection {
         state.lastPongAt = Date.now();
         return;
       }
-      this.log.debug("secondary response (ignored)", {
-        url,
-        message: raw,
-      });
+      this.log.debugOcppFrame("secondary response (ignored)", raw, { url });
     });
 
     ws.on("pong", () => {
