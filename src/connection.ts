@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { createLogger } from "./logger";
-import { OCPP_MSG_CALL, OCPP_SUBPROTOCOLS } from "./types";
+import { OCPP_SUBPROTOCOLS } from "./types";
 
 /**
  * Manages the full lifecycle of a single charger connection:
@@ -86,7 +86,7 @@ export class ChargerConnection {
 
     this.charger.on("message", (data) => {
       const raw = data.toString();
-      this.log.debug("charger → proxy", { message: this.summarise(raw) });
+      this.log.debugOcppFrame("charger → proxy", raw);
 
       if (this.primary?.readyState === WebSocket.OPEN) {
         this.primary.send(raw);
@@ -161,7 +161,7 @@ export class ChargerConnection {
 
     ws.on("message", (data) => {
       const raw = data.toString();
-      this.log.debug("primary → charger", { message: this.summarise(raw) });
+      this.log.debugOcppFrame("primary → charger", raw);
       if (this.charger.readyState === WebSocket.OPEN) {
         this.charger.send(raw);
       }
@@ -222,10 +222,7 @@ export class ChargerConnection {
         state.lastPongAt = Date.now();
         return;
       }
-      this.log.debug("secondary response (ignored)", {
-        url,
-        message: this.summarise(raw),
-      });
+      this.log.debugOcppFrame("secondary response (ignored)", raw, { url });
     });
 
     ws.on("pong", () => {
@@ -355,21 +352,4 @@ export class ChargerConnection {
     this.endCallback?.();
   }
 
-  /** Return a short summary string for logging (avoids dumping huge payloads). */
-  private summarise(raw: string): string {
-    try {
-      const msg = JSON.parse(raw) as unknown[];
-      if (!Array.isArray(msg) || msg.length < 3) return raw.slice(0, 120);
-
-      const type = msg[0] as number;
-      const id = msg[1] as string;
-
-      if (type === OCPP_MSG_CALL) {
-        return `[CALL] ${msg[2]} (${id})`;
-      }
-      return `[${type === 3 ? "RESULT" : "ERROR"}] (${id})`;
-    } catch {
-      return raw.slice(0, 120);
-    }
-  }
 }

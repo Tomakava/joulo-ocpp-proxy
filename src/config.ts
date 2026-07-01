@@ -1,11 +1,13 @@
+import type { LoggerConfig } from "./logger";
+import { parseLogLevel } from "./logger";
+import { parsePositiveInteger } from "./env";
+
 export interface Config {
   port: number;
   primaryUrl: string;
   secondaryUrls: string[];
-  logLevel: "debug" | "info" | "warn" | "error";
+  loggerConfig: LoggerConfig;
 }
-
-const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 
 export function loadConfig(): Config {
   const primaryUrl = process.env.PRIMARY_CSMS_URL;
@@ -21,10 +23,11 @@ export function loadConfig(): Config {
     .map((u) => u.trim())
     .filter(Boolean);
 
-  const level = (process.env.LOG_LEVEL ?? "info").toLowerCase();
-  const logLevel = LOG_LEVELS.includes(level as any)
-    ? (level as Config["logLevel"])
-    : "info";
+  const logLevel = parseLogLevel(process.env.LOG_LEVEL);
+  const debugMessageMaxLength = parsePositiveInteger(
+    process.env.LOG_DEBUG_MESSAGE_MAX_LENGTH,
+    120
+  );
 
   const portRaw = process.env.PORT ?? "9000";
   const port = parseInt(portRaw, 10);
@@ -38,6 +41,9 @@ export function loadConfig(): Config {
     port,
     primaryUrl,
     secondaryUrls,
-    logLevel,
+    loggerConfig: {
+      logLevel,
+      debugMessageMaxLength,
+    },
   };
 }
