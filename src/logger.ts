@@ -9,10 +9,11 @@ export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 export const DEFAULT_LOG_LEVEL: LogLevel = "info";
+export const DEFAULT_DEBUG_MESSAGE_MAX_LENGTH = 120;
 
 export interface LoggerConfig {
   logLevel: LogLevel;
-  debugMessageMaxLength: number | null;
+  debugMessageMaxLength?: number;
 }
 
 export function isLogLevel(value: string): value is LogLevel {
@@ -35,23 +36,34 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
 };
 
 let minLevel: LogLevel = DEFAULT_LOG_LEVEL;
-let debugMessageMaxLength: number | null = 120;
+let debugMessageMaxLength: number | undefined = DEFAULT_DEBUG_MESSAGE_MAX_LENGTH;
 
 export function setLogLevel(level: LogLevel): void {
   minLevel = level;
 }
 
-export function setDebugMessageMaxLength(value: number | null): void {
+export function setDebugMessageMaxLength(value?: number): void {
   debugMessageMaxLength = value;
 }
 
-export function configureLogger(config: LoggerConfig): void {
-  setLogLevel(config.logLevel);
-  setDebugMessageMaxLength(config.debugMessageMaxLength);
+function resolveDebugMessageMaxLength(
+  config: Partial<LoggerConfig>
+): number | undefined {
+  if ("debugMessageMaxLength" in config) {
+    return config.debugMessageMaxLength;
+  }
+
+  return DEFAULT_DEBUG_MESSAGE_MAX_LENGTH;
+}
+
+export function configureLogger(config: Partial<LoggerConfig> = {}): void {
+  const { logLevel } = config;
+  setLogLevel(logLevel ?? DEFAULT_LOG_LEVEL);
+  setDebugMessageMaxLength(resolveDebugMessageMaxLength(config));
 }
 
 function truncateMessage(raw: string): string {
-  if (debugMessageMaxLength === null) return raw;
+  if (debugMessageMaxLength === undefined) return raw;
   return raw.slice(0, debugMessageMaxLength);
 }
 

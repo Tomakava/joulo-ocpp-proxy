@@ -147,7 +147,7 @@ Logs are structured JSON written to stdout/stderr:
 
 Set `LOG_LEVEL=debug` for OCPP payload summaries (including message-type-prefixed payloads for troubleshooting).
 Set `LOG_DEBUG_MESSAGE_MAX_LENGTH` to a positive integer to cap logged `message` values in debug output.
-Leave it empty to disable truncation.
+Leave it unset for the default, or set it empty to disable truncation.
 
 ## Building the Docker image
 

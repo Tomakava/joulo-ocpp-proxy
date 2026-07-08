@@ -48,6 +48,15 @@ describe("loadConfig", () => {
     expect(config.loggerConfig.debugMessageMaxLength).toBe(120);
   });
 
+  it("disables debug message truncation when env var is empty", () => {
+    process.env.PRIMARY_CSMS_URL = "wss://primary.example/ws";
+    process.env.LOG_DEBUG_MESSAGE_MAX_LENGTH = "";
+
+    const config = loadConfig();
+
+    expect(config.loggerConfig.debugMessageMaxLength).toBeUndefined();
+  });
+
   it("validates port boundaries", () => {
     process.env.PRIMARY_CSMS_URL = "wss://primary.example/ws";
     process.env.PORT = "70000";

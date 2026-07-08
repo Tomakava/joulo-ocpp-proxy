@@ -36,13 +36,13 @@ describe("logger", () => {
   };
 
   beforeEach(() => {
-    configureLogger({ logLevel: "info", debugMessageMaxLength: 120 });
+    configureLogger({ logLevel: "info" });
   });
 
   it("suppresses logs below configured level", () => {
     const sink = restoreStreams();
     try {
-      configureLogger({ logLevel: "error", debugMessageMaxLength: 120 });
+      configureLogger({ logLevel: "error" });
       const logger = createLogger("proxy");
 
       logger.info("info message");
@@ -68,6 +68,48 @@ describe("logger", () => {
       expect(parsed.level).toBe("debug");
       expect(parsed.message).toContain('[OCPP CALL] (abc):');
       expect(parsed.message).toContain('[2,');
+    } finally {
+      sink.restore();
+    }
+  });
+
+  it("truncates debug message payloads by default", () => {
+    const sink = restoreStreams();
+    try {
+      configureLogger({ logLevel: "debug" });
+      const logger = createLogger("proxy");
+
+      const payload = '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
+      logger.debugOcppFrame("charger -> proxy", payload);
+
+      const parsed = JSON.parse(sink.stdoutEntries[0]);
+      const summaryPrefix = "[OCPP CALL] (abc): ";
+      const expectedPayload = payload.slice(0, 120);
+
+      expect(parsed.level).toBe("debug");
+      expect(parsed.message).toBe(summaryPrefix + expectedPayload);
+    } finally {
+      sink.restore();
+    }
+  });
+
+  it("does not truncate when debugMessageMaxLength is explicitly undefined", () => {
+    const sink = restoreStreams();
+    try {
+      configureLogger({
+        logLevel: "debug",
+        debugMessageMaxLength: undefined,
+      });
+      const logger = createLogger("proxy");
+
+      const payload = '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
+      logger.debugOcppFrame("charger -> proxy", payload);
+
+      const parsed = JSON.parse(sink.stdoutEntries[0]);
+      const summaryPrefix = "[OCPP CALL] (abc): ";
+
+      expect(parsed.level).toBe("debug");
+      expect(parsed.message).toBe(summaryPrefix + payload);
     } finally {
       sink.restore();
     }
