@@ -1,5 +1,8 @@
 import type { LoggerConfig } from "./logger";
-import { parseLogLevel } from "./logger";
+import {
+  DEFAULT_DEBUG_MESSAGE_MAX_LENGTH,
+  parseLogLevel,
+} from "./logger";
 import { parsePositiveInteger } from "./env";
 
 export interface Config {
@@ -24,10 +27,14 @@ export function loadConfig(): Config {
     .filter(Boolean);
 
   const logLevel = parseLogLevel(process.env.LOG_LEVEL);
-  const debugMessageMaxLength = parsePositiveInteger(
-    process.env.LOG_DEBUG_MESSAGE_MAX_LENGTH,
-    120
-  );
+  const rawDebugMessageMaxLength = process.env.LOG_DEBUG_MESSAGE_MAX_LENGTH?.trim();
+  const debugMessageMaxLength =
+    rawDebugMessageMaxLength === ""
+      ? undefined
+      : parsePositiveInteger(
+          rawDebugMessageMaxLength,
+          DEFAULT_DEBUG_MESSAGE_MAX_LENGTH
+        );
 
   const portRaw = process.env.PORT ?? "9000";
   const port = parseInt(portRaw, 10);

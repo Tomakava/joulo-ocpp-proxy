@@ -8,7 +8,7 @@ describe("parsePositiveInteger", () => {
   });
 
   it("returns fallback when string is blank", () => {
-    expect(parsePositiveInteger("   ", 12)).toBeNull();
+    expect(parsePositiveInteger("   ", 12)).toBe(12);
   });
 
   it("returns fallback for non-positive numbers", () => {

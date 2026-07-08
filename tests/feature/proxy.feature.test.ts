@@ -194,7 +194,6 @@ describe("proxy feature", () => {
         secondaryUrls: [`ws://127.0.0.1:${secondaryPort}`],
         loggerConfig: {
           logLevel: "error",
-          debugMessageMaxLength: 120,
         },
       }
     );
@@ -233,7 +232,6 @@ describe("proxy feature", () => {
         secondaryUrls: [],
         loggerConfig: {
           logLevel: "error",
-          debugMessageMaxLength: 120,
         },
       }
     );
@@ -256,7 +254,6 @@ describe("proxy feature", () => {
         secondaryUrls: [],
         loggerConfig: {
           logLevel: "error",
-          debugMessageMaxLength: 120,
         },
       }
     );
@@ -292,7 +289,6 @@ describe("proxy feature", () => {
         secondaryUrls: [],
         loggerConfig: {
           logLevel: "error",
-          debugMessageMaxLength: 120,
         },
       }
     );
