@@ -7,7 +7,8 @@ import vitest from '@vitest/eslint-plugin';
 
 export default defineConfig(
   js.configs.recommended,
-  tseslint.configs.recommended,
+  tseslint.configs.strictTypeChecked,
+  tseslint.configs.stylisticTypeChecked,
   {
     languageOptions: {
       parserOptions: {
@@ -16,12 +17,6 @@ export default defineConfig(
           allowDefaultProject: ['tests/*.ts', 'tests/*/*.ts'],
         },
       },
-    },
-  },
-  {
-    rules: {
-      '@typescript-eslint/no-explicit-any': 'off',
-      '@typescript-eslint/no-empty-object-type': 'off',
     },
   },
   {

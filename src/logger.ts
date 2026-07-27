@@ -72,7 +72,7 @@ function summarizeOcppFrame(raw: string): string {
     const msg = JSON.parse(raw) as unknown[];
     if (!Array.isArray(msg) || msg.length < 3) return truncateMessage(raw);
 
-    const type = msg[0] as number;
+    const type = msg[0];
     const id = String(msg[1]);
     const payload = truncateMessage(raw);
 
@@ -88,7 +88,7 @@ function summarizeOcppFrame(raw: string): string {
       return `[OCPP ERROR] (${id}): ${payload}`;
     }
 
-    return `[OCPP UNKNOWN] (${type}): ${payload}`;
+    return `[OCPP UNKNOWN] (${String(type)}): ${payload}`;
   } catch {
     return truncateMessage(raw);
   }
@@ -126,11 +126,20 @@ function log(level: LogLevel, tag: string, message: string, extra?: object) {
 
 export function createLogger(tag: string) {
   return {
-    debug: (msg: string, extra?: object) => log("debug", tag, msg, extra),
-    debugOcppFrame: (msg: string, payload: string, extra?: object) =>
-      log("debug", tag, msg, buildOcppFrameDebugExtra(payload, extra)),
-    info: (msg: string, extra?: object) => log("info", tag, msg, extra),
-    warn: (msg: string, extra?: object) => log("warn", tag, msg, extra),
-    error: (msg: string, extra?: object) => log("error", tag, msg, extra),
+    debug: (msg: string, extra?: object) => {
+      log("debug", tag, msg, extra);
+    },
+    debugOcppFrame: (msg: string, payload: string, extra?: object) => {
+      log("debug", tag, msg, buildOcppFrameDebugExtra(payload, extra));
+    },
+    info: (msg: string, extra?: object) => {
+      log("info", tag, msg, extra);
+    },
+    warn: (msg: string, extra?: object) => {
+      log("warn", tag, msg, extra);
+    },
+    error: (msg: string, extra?: object) => {
+      log("error", tag, msg, extra);
+    },
   };
 }

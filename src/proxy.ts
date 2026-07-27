@@ -48,7 +48,7 @@ export function startProxy(config: Config) {
     }
 
     const protocol = ws.protocol;
-    const authHeader = req.headers["authorization"] as string | undefined;
+    const authHeader = req.headers.authorization;
 
     log.info("charger connected", {
       chargePointId,
@@ -92,7 +92,9 @@ export function startProxy(config: Config) {
 
   const shutdown = () => {
     log.info("shutting down…");
-    wss.clients.forEach((ws) => ws.close(1001, "Server shutting down"));
+    wss.clients.forEach((ws) => {
+      ws.close(1001, "Server shutting down");
+    });
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000);
   };

@@ -7,23 +7,48 @@ import {
 
 import { configureLogger, createLogger } from "../../src/logger";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseLogEntry(line: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(line);
+  if (!isRecord(parsed)) {
+    throw new Error("Expected logger output to be a JSON object");
+  }
+
+  return parsed;
+}
+
+function getStringProperty(
+  entry: Record<string, unknown>,
+  property: string
+): string {
+  const value = entry[property];
+  if (typeof value !== "string") {
+    throw new Error(`Expected logger output property ${property} to be a string`);
+  }
+
+  return value;
+}
+
 describe("logger", () => {
   const restoreStreams = () => {
     const stdoutEntries: string[] = [];
     const stderrEntries: string[] = [];
 
-    const originalStdoutWrite = process.stdout.write;
-    const originalStderrWrite = process.stderr.write;
+    const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
 
-    process.stdout.write = (((chunk) => {
+    process.stdout.write = (chunk: string | Uint8Array) => {
       stdoutEntries.push(String(chunk));
       return true;
-    }) as (chunk: string | Buffer) => boolean) as unknown as typeof process.stdout.write;
+    };
 
-    process.stderr.write = (((chunk) => {
+    process.stderr.write = (chunk: string | Uint8Array) => {
       stderrEntries.push(String(chunk));
       return true;
-    }) as (chunk: string | Buffer) => boolean) as unknown as typeof process.stderr.write;
+    };
 
     return {
       restore: () => {
@@ -50,7 +75,8 @@ describe("logger", () => {
 
       expect(sink.stdoutEntries).toHaveLength(0);
       expect(sink.stderrEntries).toHaveLength(1);
-      expect(JSON.parse(sink.stderrEntries[0]).level).toBe("error");
+      const entry = parseLogEntry(sink.stderrEntries[0]);
+      expect(getStringProperty(entry, "level")).toBe("error");
     } finally {
       sink.restore();
     }
@@ -64,10 +90,10 @@ describe("logger", () => {
 
       logger.debugOcppFrame("charger -> proxy", '[2,"abc","Heartbeat",{}]');
 
-      const parsed = JSON.parse(sink.stdoutEntries[0]);
-      expect(parsed.level).toBe("debug");
-      expect(parsed.message).toContain('[OCPP CALL] (abc):');
-      expect(parsed.message).toContain('[2,');
+      const entry = parseLogEntry(sink.stdoutEntries[0]);
+      expect(getStringProperty(entry, "level")).toBe("debug");
+      expect(getStringProperty(entry, "message")).toContain('[OCPP CALL] (abc):');
+      expect(getStringProperty(entry, "message")).toContain('[2,');
     } finally {
       sink.restore();
     }
@@ -82,12 +108,12 @@ describe("logger", () => {
       const payload = '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
       logger.debugOcppFrame("charger -> proxy", payload);
 
-      const parsed = JSON.parse(sink.stdoutEntries[0]);
+      const entry = parseLogEntry(sink.stdoutEntries[0]);
       const summaryPrefix = "[OCPP CALL] (abc): ";
       const expectedPayload = payload.slice(0, 120);
 
-      expect(parsed.level).toBe("debug");
-      expect(parsed.message).toBe(summaryPrefix + expectedPayload);
+      expect(getStringProperty(entry, "level")).toBe("debug");
+      expect(getStringProperty(entry, "message")).toBe(summaryPrefix + expectedPayload);
     } finally {
       sink.restore();
     }
@@ -105,11 +131,11 @@ describe("logger", () => {
       const payload = '[2,"abc","Heartbeat",{"data":"' + "a".repeat(160) + '"}]';
       logger.debugOcppFrame("charger -> proxy", payload);
 
-      const parsed = JSON.parse(sink.stdoutEntries[0]);
+      const entry = parseLogEntry(sink.stdoutEntries[0]);
       const summaryPrefix = "[OCPP CALL] (abc): ";
 
-      expect(parsed.level).toBe("debug");
-      expect(parsed.message).toBe(summaryPrefix + payload);
+      expect(getStringProperty(entry, "level")).toBe("debug");
+      expect(getStringProperty(entry, "message")).toBe(summaryPrefix + payload);
     } finally {
       sink.restore();
     }
