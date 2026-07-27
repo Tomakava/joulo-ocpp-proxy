@@ -33,7 +33,7 @@
     "url": "https://github.com/joulo-nl/joulo-ocpp-proxy/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "dependencies": {
     "ws": "^8.21.1"
