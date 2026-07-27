@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { createLogger } from "./logger";
 import { OCPP_SUBPROTOCOLS } from "./types";
+import { forwardPing, forwardPong, rawDataToString } from "./websocket";
 
 /**
  * Manages the full lifecycle of a single charger connection:
@@ -16,24 +17,6 @@ import { OCPP_SUBPROTOCOLS } from "./types";
  *   periodic keepalive pings, and buffer a small bounded queue of
  *   messages while reconnecting so brief blips don't lose data.
  */
-
-function forwardPing(ws: WebSocket | null, data: Buffer) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  try {
-    ws.ping(data);
-  } catch {
-    /* best-effort — peer may have just closed */
-  }
-}
-
-function forwardPong(ws: WebSocket | null, data: Buffer) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  try {
-    ws.pong(data);
-  } catch {
-    /* best-effort — peer may have just closed */
-  }
-}
 
 const SECONDARY_RECONNECT_DELAY_MS = 10_000;
 const SECONDARY_KEEPALIVE_INTERVAL_MS = 30_000;
@@ -85,7 +68,7 @@ export class ChargerConnection {
     }
 
     this.charger.on("message", (data) => {
-      const raw = data.toString();
+      const raw = rawDataToString(data);
       this.log.debugOcppFrame("charger → proxy", raw);
 
       if (this.primary?.readyState === WebSocket.OPEN) {
@@ -160,7 +143,7 @@ export class ChargerConnection {
     });
 
     ws.on("message", (data) => {
-      const raw = data.toString();
+      const raw = rawDataToString(data);
       this.log.debugOcppFrame("primary → charger", raw);
       if (this.charger.readyState === WebSocket.OPEN) {
         this.charger.send(raw);
@@ -185,8 +168,12 @@ export class ChargerConnection {
       }
     });
 
-    ws.on("ping", (data) => forwardPing(this.charger, data));
-    ws.on("pong", (data) => forwardPong(this.charger, data));
+    ws.on("ping", (data) => {
+      forwardPing(this.charger, data);
+    });
+    ws.on("pong", (data) => {
+      forwardPong(this.charger, data);
+    });
 
     return ws;
   }
@@ -217,7 +204,7 @@ export class ChargerConnection {
     });
 
     ws.on("message", (data) => {
-      const raw = data.toString();
+      const raw = rawDataToString(data);
       if (raw === "__pong__") {
         state.lastPongAt = Date.now();
         return;
@@ -320,7 +307,7 @@ export class ChargerConnection {
   private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.authHeader) {
-      headers["Authorization"] = this.authHeader;
+      headers.Authorization = this.authHeader;
     }
     return headers;
   }

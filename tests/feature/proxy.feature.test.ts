@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 
 import { startProxy } from "../../src/proxy";
+import { rawDataToString } from "../../src/websocket";
 
 interface WsRecord {
   httpServer: ReturnType<typeof createServer>;
@@ -12,7 +13,9 @@ interface WsRecord {
 
 function waitForOpen(socket: WebSocket, timeoutMs = 2000): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("websocket timeout")), timeoutMs);
+    const timeout = setTimeout(() => {
+      reject(new Error("websocket timeout"));
+    }, timeoutMs);
     socket.once("open", () => {
       clearTimeout(timeout);
       resolve();
@@ -29,7 +32,9 @@ function waitForClose(
   timeoutMs = 2000
 ): Promise<{ code: number; reason: Buffer }> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("websocket close timeout")), timeoutMs);
+    const timeout = setTimeout(() => {
+      reject(new Error("websocket close timeout"));
+    }, timeoutMs);
     const onError = (error: Error) => {
       clearTimeout(timeout);
       socket.off("close", onClose);
@@ -80,10 +85,12 @@ async function connectWhenOpen(
 
 function waitForMessage(socket: WebSocket, timeoutMs = 2000): Promise<string> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("websocket message timeout")), timeoutMs);
+    const timeout = setTimeout(() => {
+      reject(new Error("websocket message timeout"));
+    }, timeoutMs);
     socket.once("message", (data) => {
       clearTimeout(timeout);
-      resolve(data.toString());
+      resolve(rawDataToString(data));
     });
   });
 }
@@ -156,7 +163,9 @@ describe("proxy feature", () => {
         }
 
         const port = address.port;
-        s.close(() => resolve(port));
+        s.close(() => {
+          resolve(port);
+        });
       });
     });
 
@@ -166,7 +175,7 @@ describe("proxy feature", () => {
     openChargers = [];
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     for (const charger of openChargers) {
       if (charger.readyState <= WebSocket.OPEN) {
         charger.close();
@@ -190,8 +199,8 @@ describe("proxy feature", () => {
     startProxy(
       {
         port: proxyPort,
-        primaryUrl: `ws://127.0.0.1:${primaryPort}`,
-        secondaryUrls: [`ws://127.0.0.1:${secondaryPort}`],
+        primaryUrl: `ws://127.0.0.1:${String(primaryPort)}`,
+        secondaryUrls: [`ws://127.0.0.1:${String(secondaryPort)}`],
         loggerConfig: {
           logLevel: "error",
         },
@@ -199,7 +208,7 @@ describe("proxy feature", () => {
     );
 
     const charger = await connectWhenOpen(
-      `ws://127.0.0.1:${proxyPort}/charger-1`,
+      `ws://127.0.0.1:${String(proxyPort)}/charger-1`,
       "ocpp1.6"
     );
     openChargers.push(charger);
@@ -228,7 +237,7 @@ describe("proxy feature", () => {
     startProxy(
       {
         port: proxyPort,
-        primaryUrl: `ws://127.0.0.1:${primaryPort}`,
+        primaryUrl: `ws://127.0.0.1:${String(primaryPort)}`,
         secondaryUrls: [],
         loggerConfig: {
           logLevel: "error",
@@ -236,7 +245,7 @@ describe("proxy feature", () => {
       }
     );
 
-    const charger = await connectWhenOpen(`ws://127.0.0.1:${proxyPort}/`, "ocpp1.6");
+    const charger = await connectWhenOpen(`ws://127.0.0.1:${String(proxyPort)}/`, "ocpp1.6");
     openChargers.push(charger);
     const closeEvent = await waitForClose(charger);
 
@@ -258,7 +267,10 @@ describe("proxy feature", () => {
       }
     );
 
-    const charger = await connectWhenOpen(`ws://127.0.0.1:${proxyPort}/cp-offline`, "ocpp1.6");
+    const charger = await connectWhenOpen(
+      `ws://127.0.0.1:${String(proxyPort)}/cp-offline`,
+      "ocpp1.6"
+    );
     openChargers.push(charger);
 
     const closed = await Promise.race<{
@@ -273,7 +285,12 @@ describe("proxy feature", () => {
       sleep(250).then(() => ({ closed: false })),
     ]);
 
-    expect(closed).toEqual({ closed: true, code: expect.any(Number), reason: expect.any(Buffer) });
+    expect(closed.closed).toBe(true);
+    if (!closed.closed) {
+      throw new Error("charger connection did not close");
+    }
+    expect(closed.code).toBeTypeOf("number");
+    expect(Buffer.isBuffer(closed.reason)).toBe(true);
   });
 
   it("replaces existing session for same charge point", async () => {
@@ -285,7 +302,7 @@ describe("proxy feature", () => {
     startProxy(
       {
         port: proxyPort,
-        primaryUrl: `ws://127.0.0.1:${primaryPort}`,
+        primaryUrl: `ws://127.0.0.1:${String(primaryPort)}`,
         secondaryUrls: [],
         loggerConfig: {
           logLevel: "error",
@@ -294,7 +311,7 @@ describe("proxy feature", () => {
     );
 
     const firstCharger = await connectWhenOpen(
-      `ws://127.0.0.1:${proxyPort}/cp-reconnect`,
+      `ws://127.0.0.1:${String(proxyPort)}/cp-reconnect`,
       "ocpp1.6"
     );
     openChargers.push(firstCharger);
@@ -305,7 +322,7 @@ describe("proxy feature", () => {
     const secondPrimaryConn = waitForConnection(primary);
 
     const secondCharger = await connectWhenOpen(
-      `ws://127.0.0.1:${proxyPort}/cp-reconnect`,
+      `ws://127.0.0.1:${String(proxyPort)}/cp-reconnect`,
       "ocpp1.6"
     );
     openChargers.push(secondCharger);
