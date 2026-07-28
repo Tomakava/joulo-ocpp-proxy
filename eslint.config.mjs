@@ -12,10 +12,7 @@ export default defineConfig(
   {
     languageOptions: {
       parserOptions: {
-        projectService: {
-          defaultProject: './tsconfig.eslint.json',
-          allowDefaultProject: ['tests/*.ts', 'tests/*/*.ts'],
-        },
+        projectService: true,
       },
     },
   },
