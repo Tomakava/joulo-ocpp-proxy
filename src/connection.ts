@@ -1,7 +1,9 @@
 import WebSocket from "ws";
+import type { CsmsBackend } from "./config";
 import { createLogger } from "./logger";
 import { OCPP_SUBPROTOCOLS } from "./types";
-import { forwardPing, forwardPong, rawDataToString } from "./websocket";
+import { forwardPing, forwardPong, rawDataToString } from "./utils/websocket";
+import { resolveCsmsUrl } from "./utils/url";
 
 /**
  * Manages the full lifecycle of a single charger connection:
@@ -41,22 +43,23 @@ export class ChargerConnection {
   constructor(
     private readonly charger: WebSocket,
     private readonly chargePointId: string,
-    private readonly primaryUrl: string,
-    private readonly secondaryUrls: string[],
+    private readonly primaryBackend: CsmsBackend,
+    private readonly secondaryBackends: CsmsBackend[],
     private readonly protocol: string,
     private readonly authHeader: string | undefined,
-    private readonly endCallback?: () => void
+    private readonly endCallback?: () => void,
   ) {
     this.log = createLogger(chargePointId);
     this.setup();
   }
 
   private setup() {
-    this.primary = this.connectPrimary(this.primaryUrl);
+    const primaryUrl = this.resolveUrl(this.primaryBackend);
+    this.primary = this.connectPrimary(primaryUrl);
 
-    for (const url of this.secondaryUrls) {
+    for (const backend of this.secondaryBackends) {
       const state: SecondaryState = {
-        url,
+        url: this.resolveUrl(backend),
         ws: null,
         queue: [],
         keepalive: null,
@@ -113,8 +116,8 @@ export class ChargerConnection {
     });
 
     this.log.info("session started", {
-      primary: this.primaryUrl,
-      secondaries: this.secondaryUrls,
+      primary: primaryUrl,
+      secondaries: this.secondaries.map((secondary) => secondary.url),
       protocol: this.protocol,
     });
   }
@@ -125,9 +128,7 @@ export class ChargerConnection {
    * tears the whole session down (chargers expect to talk to exactly one
    * CSMS at a time).
    */
-  private connectPrimary(baseUrl: string): WebSocket {
-    const url = `${baseUrl.replace(/\/+$/, "")}/${this.chargePointId}`;
-
+  private connectPrimary(url: string): WebSocket {
     const ws = new WebSocket(
       url,
       this.protocol ? [this.protocol] : OCPP_SUBPROTOCOLS,
@@ -185,10 +186,8 @@ export class ChargerConnection {
    * connections aren't dropped by intermediaries.
    */
   private connectSecondary(state: SecondaryState): WebSocket {
-    const url = `${state.url.replace(/\/+$/, "")}/${this.chargePointId}`;
-
     const ws = new WebSocket(
-      url,
+      state.url,
       this.protocol ? [this.protocol] : OCPP_SUBPROTOCOLS,
       {
         headers: this.buildHeaders(),
@@ -197,7 +196,7 @@ export class ChargerConnection {
     );
 
     ws.on("open", () => {
-      this.log.info("secondary connected", { url });
+      this.log.info("secondary connected", { url: state.url });
       state.lastPongAt = Date.now();
       this.flushSecondaryQueue(state, ws);
       this.startSecondaryKeepalive(state, ws);
@@ -209,7 +208,7 @@ export class ChargerConnection {
         state.lastPongAt = Date.now();
         return;
       }
-      this.log.debugOcppFrame("secondary response (ignored)", raw, { url });
+      this.log.debugOcppFrame("secondary response (ignored)", raw, { url: state.url });
     });
 
     ws.on("pong", () => {
@@ -218,7 +217,7 @@ export class ChargerConnection {
 
     ws.on("close", (code, reason) => {
       this.log.warn("secondary disconnected", {
-        url,
+        url: state.url,
         code,
         reason: reason.toString(),
       });
@@ -227,7 +226,10 @@ export class ChargerConnection {
     });
 
     ws.on("error", (err) => {
-      this.log.error("secondary error", { url, error: err.message });
+      this.log.error("secondary error", {
+        url: state.url,
+        error: err.message,
+      });
     });
 
     return ws;
@@ -302,6 +304,10 @@ export class ChargerConnection {
       if (!this.alive) return;
       state.ws = this.connectSecondary(state);
     }, SECONDARY_RECONNECT_DELAY_MS);
+  }
+
+  private resolveUrl(backend: CsmsBackend): string {
+    return resolveCsmsUrl(backend, this.chargePointId);
   }
 
   private buildHeaders(): Record<string, string> {
