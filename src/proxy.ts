@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Config, SecondaryTarget } from "./config";
 import { ChargerConnection } from "./connection";
 import { createLogger } from "./logger";
+import { StateStore } from "./state";
 import { OCPP_SUBPROTOCOLS } from "./types";
 
 const log = createLogger("proxy");
@@ -17,6 +18,9 @@ const log = createLogger("proxy");
  */
 export function startProxy(config: Config) {
   const sessions = new Map<string, ChargerConnection>();
+
+  const store = new StateStore();
+  store.load();
 
   const server = createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -88,6 +92,7 @@ export function startProxy(config: Config) {
       secondaries,
       protocol,
       authHeader,
+      store,
       () => sessions.delete(chargePointId)
     );
     sessions.set(chargePointId, conn);
@@ -108,6 +113,7 @@ export function startProxy(config: Config) {
 
   const shutdown = () => {
     log.info("shutting down…");
+    store.flush();
     wss.clients.forEach((ws) => {
       ws.close(1001, "Server shutting down");
     });

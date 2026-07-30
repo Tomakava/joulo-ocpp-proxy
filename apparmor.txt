@@ -18,6 +18,8 @@ profile joulo_ocpp_proxy flags=(attach_disconnected,mediate_deleted) {
   /app/dist/** r,
   /app/node_modules/** r,
   /data/options.json r,
+  /data/state.json rw,
+  /data/state.json.tmp rw,
   /bin/sh r,
   /bin/busybox r,
   /tmp/** rw,
