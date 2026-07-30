@@ -1,8 +1,12 @@
+import { tmpdir } from "os";
+import { join } from "path";
+
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import WebSocket from "ws";
 import type { CsmsBackend, SecondaryTarget } from "../../src/config";
 
 import { ChargerConnection } from "../../src/connection";
+import { StateStore } from "../../src/state";
 
 interface WsConnectCall {
   url: string;
@@ -89,6 +93,11 @@ beforeEach(() => {
   sockets = [];
 });
 
+/** Persistence isn't under test here; keep it off the real /data path. */
+function createTestStore() {
+  return new StateStore(join(tmpdir(), "ocpp-proxy-connection-test-state.json"));
+}
+
 function createMockChargerSocket() {
   // `null` is handled by the WebSocket mock above; the real `ws` constructor
   // cannot be used this way outside this test.
@@ -144,6 +153,7 @@ describe("ChargerConnection", () => {
         [secondary],
         protocol,
         undefined,
+        createTestStore(),
       );
 
       expect(connectCalls).toEqual([
@@ -171,6 +181,7 @@ describe("ChargerConnection", () => {
       [secondary],
       "ocpp1.6",
       undefined,
+      createTestStore(),
     );
 
     // sockets: [charger, primary, secondary]
