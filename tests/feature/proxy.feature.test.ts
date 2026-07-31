@@ -222,6 +222,7 @@ describe("proxy feature", () => {
             appendChargePointId: true,
           }
         ],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
         },
@@ -276,6 +277,7 @@ describe("proxy feature", () => {
           appendChargePointId: true,
         },
       ],
+      secondariesByCharger: new Map(),
       loggerConfig: {
         logLevel: "error",
       },
@@ -326,6 +328,7 @@ describe("proxy feature", () => {
           appendChargePointId: true,
         },
         secondaryCsms: [],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
           debugMessageMaxLength: 120,
@@ -360,6 +363,7 @@ describe("proxy feature", () => {
           appendChargePointId: true,
         },
         secondaryCsms: [],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
           debugMessageMaxLength: 120,
@@ -398,6 +402,7 @@ describe("proxy feature", () => {
           url: `ws://127.0.0.1:${String(secondaryPort)}/mirror?tenant=auditor`,
           appendChargePointId: true,
         }],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
           debugMessageMaxLength: 120,
@@ -434,6 +439,7 @@ describe("proxy feature", () => {
           appendChargePointId: true,
         },
         secondaryCsms: [],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
         },
@@ -459,6 +465,7 @@ describe("proxy feature", () => {
           appendChargePointId: true,
         },
         secondaryCsms: [],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
         },
@@ -505,6 +512,7 @@ describe("proxy feature", () => {
           appendChargePointId: true,
         },
         secondaryCsms: [],
+        secondariesByCharger: new Map(),
         loggerConfig: {
           logLevel: "error",
         },
@@ -547,5 +555,161 @@ describe("proxy feature", () => {
 
     closeWaits.push(waitForClose(secondUpstream));
     await Promise.all(closeWaits);
+  });
+  it("rewrites mirrored frames for a mapped secondary", async () => {
+    const primaryConnPromise = waitForConnection(primary);
+    const secondaryConnPromise = waitForConnection(secondary);
+
+    const primaryPort = await startWsServer(primary);
+    const secondaryPort = await startWsServer(secondary);
+    const proxyPort = await allocatePort();
+
+    startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [],
+      secondariesByCharger: new Map([
+        [
+          "cp-mapped",
+          [
+            {
+              url: `ws://127.0.0.1:${String(secondaryPort)}`,
+              appendChargePointId: true,
+              mappedChargerId: "ext-cp-mapped",
+              idTag: "HARDCODED-TAG",
+            },
+          ],
+        ],
+      ]),
+      loggerConfig: {
+        logLevel: "error",
+      },
+    });
+
+    const charger = await connectWhenOpen(
+      `ws://127.0.0.1:${String(proxyPort)}/cp-mapped`,
+      "ocpp1.6"
+    );
+    openChargers.push(charger);
+
+    const [{ socket: primaryConn }, { socket: secondaryConn, url: secondaryPath }] =
+      await Promise.all([primaryConnPromise, secondaryConnPromise]);
+
+    // The secondary is reached under its mapped charger ID.
+    expect(secondaryPath).toBe("/ext-cp-mapped");
+
+    const secondaryFrames: string[] = [];
+    secondaryConn.on("message", (data) => {
+      secondaryFrames.push(rawDataToString(data));
+    });
+
+    // BootNotification: the serial number is rewritten to the mapped ID.
+    charger.send(
+      '[2,"boot-1","BootNotification",{"chargePointSerialNumber":"cp-mapped"}]'
+    );
+
+    // StartTransaction: the configured idTag replaces the charger's.
+    const primaryStart = waitForMessage(primaryConn, 5000);
+    charger.send(
+      '[2,"start-1","StartTransaction",{"connectorId":1,"idTag":"CARD-1","meterStart":0}]'
+    );
+    await primaryStart;
+
+    // Each CSMS assigns its own transaction ID.
+    primaryConn.send('[3,"start-1",{"transactionId":111,"idTagInfo":{"status":"Accepted"}}]');
+    secondaryConn.send('[3,"start-1",{"transactionId":222,"idTagInfo":{"status":"Accepted"}}]');
+    await sleep(150);
+
+    // MeterValues for primary transaction 111 must reach the secondary as 222.
+    charger.send('[2,"meter-1","MeterValues",{"connectorId":1,"transactionId":111}]');
+    await sleep(200);
+
+    const boot = JSON.parse(secondaryFrames[0]) as [number, string, string, Record<string, unknown>];
+    expect(boot[3].chargePointSerialNumber).toBe("ext-cp-mapped");
+
+    const start = JSON.parse(secondaryFrames[1]) as [number, string, string, Record<string, unknown>];
+    expect(start[3].idTag).toBe("HARDCODED-TAG");
+
+    const meter = JSON.parse(secondaryFrames[2]) as [number, string, string, Record<string, unknown>];
+    expect(meter[3].transactionId).toBe(222);
+
+    // A frame the proxy can't parse has nothing to rewrite, so a mapped
+    // secondary still receives it byte-for-byte rather than losing it.
+    charger.send("not-ocpp");
+    await sleep(200);
+    expect(secondaryFrames[3]).toBe("not-ocpp");
+  });
+
+  it("forwards read-only secondary CALLs to the charger and refuses the rest", async () => {
+    const primaryConnPromise = waitForConnection(primary);
+    const secondaryConnPromise = waitForConnection(secondary);
+
+    const primaryPort = await startWsServer(primary);
+    const secondaryPort = await startWsServer(secondary);
+    const proxyPort = await allocatePort();
+
+    startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [
+        {
+          url: `ws://127.0.0.1:${String(secondaryPort)}`,
+          appendChargePointId: true,
+        },
+      ],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+      },
+    });
+
+    const charger = await connectWhenOpen(
+      `ws://127.0.0.1:${String(proxyPort)}/cp-commands`,
+      "ocpp1.6"
+    );
+    openChargers.push(charger);
+
+    const [{ socket: primaryConn }, { socket: secondaryConn }] =
+      await Promise.all([primaryConnPromise, secondaryConnPromise]);
+
+    const chargerFrames: string[] = [];
+    charger.on("message", (data) => {
+      chargerFrames.push(rawDataToString(data));
+    });
+    const primaryFrames: string[] = [];
+    primaryConn.on("message", (data) => {
+      primaryFrames.push(rawDataToString(data));
+    });
+    const secondaryFrames: string[] = [];
+    secondaryConn.on("message", (data) => {
+      secondaryFrames.push(rawDataToString(data));
+    });
+
+    secondaryConn.send('[2,"trig-1","TriggerMessage",{"requestedMessage":"MeterValues"}]');
+    secondaryConn.send('[2,"reset-1","Reset",{"type":"Hard"}]');
+    secondaryConn.send('[2,"weird-1","MakeCoffee",{}]');
+    await sleep(200);
+
+    // Only the diagnostics CALL reaches the charger.
+    expect(chargerFrames).toEqual([
+      '[2,"trig-1","TriggerMessage",{"requestedMessage":"MeterValues"}]',
+    ]);
+
+    // The charger's reply goes back to that secondary only, never the primary.
+    charger.send('[3,"trig-1",{"status":"Accepted"}]');
+    await sleep(200);
+
+    expect(primaryFrames).toEqual([]);
+    expect(secondaryFrames).toEqual([
+      '[3,"reset-1",{"status":"Rejected"}]',
+      `[4,"weird-1","NotSupported","Action 'MakeCoffee' is not supported by the proxy",{}]`,
+      '[3,"trig-1",{"status":"Accepted"}]',
+    ]);
   });
 });

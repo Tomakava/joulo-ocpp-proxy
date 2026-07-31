@@ -1,8 +1,18 @@
 {
   "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
-  "secondary_csms": [
-    { "url": "wss://analytics.example.com/ocpp" },
-    { "url": "wss://other-backend.example.com/ocpp" }
+  "secondary_csms": [{ "url": "wss://mirror-every-charger.example.com/ocpp" }],
+  "charger_mappings": [
+    {
+      "secondary_url": "wss://analytics.example.com/ocpp",
+      "charger_id": "CHARGER-001"
+    },
+    {
+      "secondary_url": "wss://other-backend.example.com/ocpp",
+      "charger_id": "CHARGER-001",
+      "mapped_charger_id": "ext-CHARGER-001",
+      "password": "secret123",
+      "id_tag": "HARDCODED-TAG"
+    }
   ],
   "log_level": "info",
   "log_debug_message_max_length": 120
