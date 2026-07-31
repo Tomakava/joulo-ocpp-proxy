@@ -1,8 +1,16 @@
 services:
   ocpp-proxy:
     build: .
+    user: node
     ports:
       - "9000:9000"
     env_file:
       - .env
+    # Alternatively, configure via a JSON config file (the same options the
+    # Home Assistant add-on uses). See config.example.json.
+    # Environment variables take precedence over config file options.
+    # volumes:
+    #   - ./config.json:/data/config.json:ro
+    # environment:
+    #   - CONFIG_FILE=/data/config.json
     restart: unless-stopped

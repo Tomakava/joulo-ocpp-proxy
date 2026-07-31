@@ -41,6 +41,29 @@ A secondary failure never affects the charger or the primary link.
 
 ## Quick start
 
+### Home Assistant App
+
+The easiest way to run the proxy on a Home Assistant installation.
+
+**1. Add the repository**
+
+In Home Assistant, go to **Settings → Apps → Install app**, then open the three-dot menu in the top right → **Repositories**, and add:
+
+```
+https://github.com/tomakava/joulo-ocpp-proxy
+```
+
+**2. Install**
+
+After the repository loads, find **Joulo OCPP Proxy** in the store and click **Install**.
+
+**3. Configure and start**
+
+Open the app's **Documentation** tab (same as [DOCS.md](DOCS.md)) for setup steps and a description of every
+option, then fill in the **Configuration** tab and click **Start**.
+
+---
+
 ### Using Docker (recommended)
 
 A pre-built image is published automatically to GitHub Container Registry on every push to `main`.
@@ -63,6 +86,13 @@ cp .env.example .env
 docker compose up -d
 ```
 
+To use a JSON config file instead, copy `config.example.json` to `config.json` and
+uncomment the `volumes`/`environment` block in `docker-compose.yml`:
+
+```bash
+cp config.example.json config.json
+```
+
 ### From source
 
 ```bash
@@ -75,17 +105,48 @@ PRIMARY_CSMS_URL=wss://your-csms.example.com/ocpp npm start
 
 ## Configuration
 
-All configuration is done through environment variables:
+### Config file (recommended)
+
+Create a `config.json` file (see `config.example.json`) and point the container at it with `CONFIG_FILE`:
+
+```json
+{
+  "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
+  "secondary_csms": [
+    { "url": "wss://analytics.example.com/ocpp" },
+    { "url": "wss://other-backend.example.com/ocpp" }
+  ],
+  "log_level": "info",
+  "log_debug_message_max_length": 120
+}
+```
+
+Each config file option maps to the environment variable of the same name in
+upper case (`log_level` → `LOG_LEVEL`,
+`primary_csms_append_charge_point_id` → `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID`).
+Set `log_debug_message_max_length` to `0` or `""` to disable truncation
+entirely.
+
+An option of the wrong type is reported in the log and ignored, so a typo in the
+config file falls back to the default instead of stopping the proxy. A missing
+`primary_csms_url` is fatal — the proxy logs one line saying so and exits.
+
+### Environment variables
+
+For simple deployments, environment variables are sufficient:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `CONFIG_FILE` | No | `/data/options.json` | Path to the JSON config file |
 | `PORT` | No | `9000` | Port the proxy listens on |
-| `PRIMARY_CSMS_URL` | **Yes** | — | WebSocket URL of your primary CSMS |
+| `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs |
-| `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `PRIMARY_CSMS_URL` |
-| `SECONDARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `SECONDARY_CSMS_URLS` |
+| `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `PRIMARY_CSMS_URL`. Config file: `primary_csms_append_charge_point_id` |
+| `SECONDARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `SECONDARY_CSMS_URLS`. Config file: `secondary_csms_append_charge_point_id` |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
-| `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No | `120` | Max char length for debug payload summaries. Leave empty to disable truncation |
+| `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No | `120` | Max char length for debug payload summaries. `0` or empty disables truncation |
+
+\* Required if not set in the config file. Environment variables take precedence over the config file.
 
 ## Charger setup
 
@@ -158,7 +219,7 @@ Logs are structured JSON written to stdout/stderr:
 
 Set `LOG_LEVEL=debug` for OCPP payload summaries (including message-type-prefixed payloads for troubleshooting).
 Set `LOG_DEBUG_MESSAGE_MAX_LENGTH` to a positive integer to cap logged `message` values in debug output.
-Leave it unset for the default, or set it empty to disable truncation.
+Leave it unset for the default, or set it to `0` or empty to disable truncation.
 
 ## Building the Docker image
 
@@ -166,7 +227,7 @@ Leave it unset for the default, or set it empty to disable truncation.
 docker build -t joulo-ocpp-proxy .
 ```
 
-The image uses a multi-stage build and runs as a non-root user (`node`).
+The image uses a multi-stage build. The Home Assistant add-on runs it as root (per the add-on contract); the bundled `docker-compose.yml` sets `user: node` so plain Docker deployments run unprivileged.
 
 ## Contributing
 
