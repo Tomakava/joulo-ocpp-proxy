@@ -59,7 +59,7 @@ export function decodeOcppFrame(raw: string): ParsedMessage | null {
   const frame = parseOcppFrameArray(raw);
   if (frame === null) return null;
 
-  const [rawType, rawId, third] = frame;
+  const [rawType, rawId, third, fourth] = frame;
   const type = toOcppMessageType(rawType);
   if (type === null) return null;
   if (typeof rawId !== "string" && typeof rawId !== "number") return null;
@@ -68,8 +68,42 @@ export function decodeOcppFrame(raw: string): ParsedMessage | null {
 
   if (type === OCPP_MSG_CALL) {
     if (typeof third !== "string") return null;
-    return { type, id, raw, action: third };
+    return { type, id, raw, action: third, payload: fourth };
+  }
+
+  if (type === OCPP_MSG_CALLRESULT) {
+    return { type, id, raw, payload: third };
   }
 
   return { type, id, raw };
+}
+
+/** Serialize a CALL frame, e.g. after rewriting its payload for a secondary. */
+export function encodeCall(
+  id: string,
+  action: string,
+  payload: unknown
+): string {
+  return JSON.stringify([OCPP_MSG_CALL, id, action, payload ?? {}]);
+}
+
+/** Serialize a CALLRESULT frame, used for replies the proxy answers itself. */
+export function encodeCallResult(id: string, payload: unknown): string {
+  return JSON.stringify([OCPP_MSG_CALLRESULT, id, payload ?? {}]);
+}
+
+/** Serialize a CALLERROR frame, used to refuse a CALL the proxy won't relay. */
+export function encodeCallError(
+  id: string,
+  errorCode: string,
+  errorDescription: string,
+  errorDetails: unknown = {}
+): string {
+  return JSON.stringify([
+    OCPP_MSG_CALLERROR,
+    id,
+    errorCode,
+    errorDescription,
+    errorDetails,
+  ]);
 }

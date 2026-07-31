@@ -20,7 +20,10 @@ const log = createLogger("config");
 export interface Config {
   port: number;
   primaryCsms: CsmsBackend;
+  /** Mirrors that receive traffic from every charger. */
   secondaryCsms: CsmsBackend[];
+  /** Mirrors wired to one specific charger, keyed by its charge point ID. */
+  secondariesByCharger: Map<string, SecondaryTarget[]>;
   loggerConfig: LoggerConfig;
 }
 
@@ -29,13 +32,32 @@ export interface CsmsBackend {
   appendChargePointId: boolean;
 }
 
+/**
+ * A secondary backend wired to a single charger, which may know that charger
+ * under a different ID and expect its own credentials and idTag.
+ */
+export interface SecondaryTarget extends CsmsBackend {
+  mappedChargerId: string;
+  password?: string;
+  idTag?: string;
+}
+
 interface FileSecondary {
   url: string;
+}
+
+interface FileChargerMapping {
+  secondary_url: string;
+  charger_id: string;
+  mapped_charger_id?: string;
+  password?: string;
+  id_tag?: string;
 }
 
 interface FileOptions {
   primary_csms_url?: string;
   secondary_csms?: FileSecondary[];
+  charger_mappings?: FileChargerMapping[];
   log_level?: string;
   /** Empty string disables truncation, matching LOG_DEBUG_MESSAGE_MAX_LENGTH. */
   log_debug_message_max_length?: number | string;
@@ -78,6 +100,7 @@ function parseFileOptions(parsed: unknown): FileOptions {
   return {
     primary_csms_url: readString(raw.primary_csms_url, "primary_csms_url"),
     secondary_csms: readSecondaries(raw.secondary_csms),
+    charger_mappings: readChargerMappings(raw.charger_mappings),
     log_level: readString(raw.log_level, "log_level"),
     log_debug_message_max_length:
       readScalar(
@@ -151,6 +174,58 @@ function readSecondaries(value: unknown): FileSecondary[] | undefined {
   return secondaries;
 }
 
+function readChargerMappings(
+  value: unknown
+): FileChargerMapping[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    log.warn("config file option ignored: expected a list", {
+      option: "charger_mappings",
+    });
+    return undefined;
+  }
+
+  const mappings: FileChargerMapping[] = [];
+  value.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null) {
+      log.warn("charger_mappings entry ignored: expected an object", { index });
+      return;
+    }
+
+    const raw = entry as Record<string, unknown>;
+    const secondaryUrl = readEntryString(raw.secondary_url);
+    const chargerId = readEntryString(raw.charger_id);
+
+    if (secondaryUrl === undefined || chargerId === undefined) {
+      // Report the position only — a mapping can carry a password, and this
+      // log line ends up in the Home Assistant addon log.
+      log.warn(
+        "charger_mappings entry ignored: secondary_url and charger_id are required",
+        { index }
+      );
+      return;
+    }
+
+    mappings.push({
+      secondary_url: secondaryUrl,
+      charger_id: chargerId,
+      mapped_charger_id: readEntryString(raw.mapped_charger_id),
+      password: readEntryString(raw.password),
+      id_tag: readEntryString(raw.id_tag),
+    });
+  });
+
+  return mappings;
+}
+
+/** A trimmed, non-empty string from a config file entry, or undefined. */
+function readEntryString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 /**
  * Resolve a setting from the environment first, falling back to the config
  * file. File values are stringified so both sources share the same parser.
@@ -187,6 +262,35 @@ function parseSetting<T>(
       cause: error,
     });
   }
+}
+
+/**
+ * Group charger_mappings entries by the charge point ID the charger connects
+ * with. Each entry wires one charger to one secondary backend, optionally under
+ * a different identity.
+ */
+function buildSecondariesByCharger(
+  entries: FileChargerMapping[],
+  appendChargePointId: boolean
+): Map<string, SecondaryTarget[]> {
+  const result = new Map<string, SecondaryTarget[]>();
+
+  // Entries arrive validated from parseFileOptions: both ids are non-empty.
+  for (const entry of entries) {
+    const target: SecondaryTarget = {
+      url: entry.secondary_url,
+      appendChargePointId,
+      mappedChargerId: entry.mapped_charger_id ?? entry.charger_id,
+      password: entry.password,
+      idTag: entry.id_tag,
+    };
+
+    const targets = result.get(entry.charger_id);
+    if (targets) targets.push(target);
+    else result.set(entry.charger_id, [target]);
+  }
+
+  return result;
 }
 
 export function loadConfig(): Config {
@@ -246,6 +350,11 @@ export function loadConfig(): Config {
     parseIntegerInRange(value ?? "9000", 1, 65535)
   );
 
+  const secondariesByCharger = buildSecondariesByCharger(
+    file.charger_mappings ?? [],
+    secondaryAppendChargePointId
+  );
+
   return {
     port,
     primaryCsms: {
@@ -253,6 +362,7 @@ export function loadConfig(): Config {
       appendChargePointId: primaryAppendChargePointId,
     },
     secondaryCsms,
+    secondariesByCharger,
     loggerConfig: {
       logLevel,
       debugMessageMaxLength,
