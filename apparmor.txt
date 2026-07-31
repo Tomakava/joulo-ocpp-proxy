@@ -1,0 +1,28 @@
+#include <tunables/global>
+
+profile joulo_ocpp_proxy flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+
+  /usr/local/bin/node rix,
+  /usr/local/bin/docker-entrypoint.sh r,
+  /usr/local/lib/** r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/ssl/openssl.cnf r,
+  /etc/ssl/certs/** r,
+  /app/dist/** r,
+  /app/node_modules/** r,
+  /data/options.json r,
+  /bin/sh r,
+  /bin/busybox r,
+  /tmp/** rw,
+  @{PROC}/** r,
+
+  deny @{PROC}/sys/kernel/** w,
+  deny /sys/kernel/security/** rwklx,
+}

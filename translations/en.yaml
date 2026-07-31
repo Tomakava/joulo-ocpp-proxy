@@ -1,0 +1,46 @@
+configuration:
+  primary_csms_url:
+    name: Primary CSMS URL
+    description: >-
+      Backend your chargers normally connect to, e.g.
+      wss://your-csms.example.com/ocpp. The charger ID is appended
+      automatically unless disabled below. Its replies are the only ones sent
+      back to the charger.
+  primary_csms_append_charge_point_id:
+    name: Add charger ID to primary URL
+    description: >-
+      Adds /<charger ID> to the primary CSMS URL. Turn off if the backend gave
+      you a complete URL that already identifies the charger.
+  secondary_csms:
+    name: Mirror to backends
+    description: >-
+      Extra backends that receive a copy of the traffic from every charger,
+      under the charger's own ID. Their replies are never sent to the charger.
+    fields:
+      url:
+        name: Backend URL
+        description: >-
+          WebSocket URL of the backend, e.g. wss://analytics.example.com/ocpp.
+          The charger ID is appended automatically unless disabled below.
+  secondary_csms_append_charge_point_id:
+    name: Add charger ID to mirror URLs
+    description: >-
+      Adds /<charger ID> to every mirror backend URL. Turn off if your mirror
+      URLs already identify the charger.
+  log_level:
+    name: Log level
+    description: >-
+      How much the proxy logs. Use debug to see OCPP message contents when
+      troubleshooting.
+  log_debug_message_max_length:
+    name: Debug message length limit
+    description: >-
+      Maximum number of characters of each OCPP message shown in debug logs.
+      0 shows complete messages.
+  log_max_message_length:
+    name: Debug message length limit (deprecated)
+    description: >-
+      Old name of "Debug message length limit". Leave empty and use that
+      option instead.
+network:
+  9000/tcp: Port your chargers connect to (ws://<home-assistant-ip>:9000/<charger-id>)
