@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import WebSocket from "ws";
-import type { CsmsBackend } from "../../src/config";
+import type { CsmsBackend, SecondaryTarget } from "../../src/config";
 
 import { ChargerConnection } from "../../src/connection";
 
@@ -131,9 +131,10 @@ describe("ChargerConnection", () => {
         url: primaryUrl,
         appendChargePointId,
       };
-      const secondary: CsmsBackend = {
+      const secondary: SecondaryTarget = {
         url: secondaryUrl,
         appendChargePointId,
+        mappedChargerId: "cp-abc",
       };
 
       new ChargerConnection(
@@ -154,16 +155,20 @@ describe("ChargerConnection", () => {
 
   it("queues a mirrored frame when the secondary send fails, and replays it on reconnect", () => {
     const charger = createMockChargerSocket();
-    const backend: CsmsBackend = {
+    const primary: CsmsBackend = {
       url: "ws://csms.example/endpoint",
       appendChargePointId: false,
+    };
+    const secondary: SecondaryTarget = {
+      ...primary,
+      mappedChargerId: "cp-queue",
     };
 
     const connection = new ChargerConnection(
       charger,
       "cp-queue",
-      backend,
-      [backend],
+      primary,
+      [secondary],
       "ocpp1.6",
       undefined,
     );

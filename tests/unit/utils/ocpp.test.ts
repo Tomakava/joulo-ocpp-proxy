@@ -15,6 +15,7 @@ describe("decodeOcppFrame", () => {
       type: OCPP_MSG_CALL,
       id: "msg-1",
       action: "BootNotification",
+      payload: { model: "X" },
       raw,
     });
   });
@@ -25,6 +26,7 @@ describe("decodeOcppFrame", () => {
     expect(decodeOcppFrame(raw)).toEqual({
       type: OCPP_MSG_CALLRESULT,
       id: "msg-1",
+      payload: { status: "Accepted" },
       raw,
     });
   });

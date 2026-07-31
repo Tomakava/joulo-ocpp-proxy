@@ -13,6 +13,7 @@ import {
 } from "vitest";
 
 import { loadConfig } from "../../src/config";
+import { configureLogger } from "../../src/logger";
 
 describe("loadConfig", () => {
   const environmentVariables = [
@@ -35,6 +36,7 @@ describe("loadConfig", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    configureLogger({ logLevel: "info" });
   });
 
   it("requires PRIMARY_CSMS_URL", () => {
@@ -273,6 +275,70 @@ describe("loadConfig", () => {
       });
 
       expect(loadConfig().loggerConfig.debugMessageMaxLength).toBe(30);
+    });
+
+    it("groups charger_mappings by charge point ID", () => {
+      writeConfigFile({
+        primary_csms_url: "wss://primary.example/ws",
+        charger_mappings: [
+          {
+            secondary_url: "wss://analytics.example/ws",
+            charger_id: "CP-1",
+          },
+          {
+            secondary_url: "wss://other.example/ws",
+            charger_id: "CP-1",
+            mapped_charger_id: "ext-CP-1",
+            password: "secret",
+            id_tag: "TAG",
+          },
+          { secondary_url: "wss://analytics.example/ws", charger_id: "CP-2" },
+          // Incomplete entries are skipped rather than failing startup.
+          { charger_id: "CP-3" },
+        ],
+      });
+
+      const { secondariesByCharger } = loadConfig();
+
+      expect([...secondariesByCharger.keys()]).toEqual(["CP-1", "CP-2"]);
+      expect(secondariesByCharger.get("CP-1")).toEqual([
+        {
+          url: "wss://analytics.example/ws",
+          appendChargePointId: true,
+          mappedChargerId: "CP-1",
+          password: undefined,
+          idTag: undefined,
+        },
+        {
+          url: "wss://other.example/ws",
+          appendChargePointId: true,
+          mappedChargerId: "ext-CP-1",
+          password: "secret",
+          idTag: "TAG",
+        },
+      ]);
+    });
+
+    it("never logs a mapping password when skipping an invalid entry", () => {
+      writeConfigFile({
+        primary_csms_url: "wss://primary.example/ws",
+        charger_mappings: [{ charger_id: "CP-1", password: "hunter2" }],
+      });
+
+      const lines: string[] = [];
+      configureLogger({
+        logLevel: "warn",
+        sink: {
+          stdout: (line) => lines.push(line),
+          stderr: (line) => lines.push(line),
+        },
+      });
+
+      loadConfig();
+
+      const output = lines.join(" ");
+      expect(output).toContain("charger_mappings entry ignored");
+      expect(output).not.toContain("hunter2");
     });
 
     it("rejects an invalid config file value", () => {

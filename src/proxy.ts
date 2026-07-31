@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import type { Config } from "./config";
+import type { Config, SecondaryTarget } from "./config";
 import { ChargerConnection } from "./connection";
 import { createLogger } from "./logger";
 import { OCPP_SUBPROTOCOLS } from "./types";
@@ -66,11 +66,26 @@ export function startProxy(config: Config) {
       existing.teardown();
     }
 
+    // Global mirrors see every charger under its own ID; charger_mappings add
+    // per-charger mirrors that may use a different identity and credentials.
+    const secondaries: SecondaryTarget[] = [
+      ...config.secondaryCsms.map((backend) => ({
+        ...backend,
+        mappedChargerId: chargePointId,
+      })),
+      ...(config.secondariesByCharger.get(chargePointId) ?? []),
+    ];
+    if (secondaries.length === 0) {
+      log.info("no secondaries configured for this charger; primary only", {
+        chargePointId,
+      });
+    }
+
     const conn = new ChargerConnection(
       ws,
       chargePointId,
       config.primaryCsms,
-      config.secondaryCsms,
+      secondaries,
       protocol,
       authHeader,
       () => sessions.delete(chargePointId)
@@ -87,6 +102,7 @@ export function startProxy(config: Config) {
       port: config.port,
       primary: config.primaryCsms.url,
       secondaries: config.secondaryCsms.map((backend) => backend.url),
+      mappedChargers: [...config.secondariesByCharger.keys()],
     });
   });
 
