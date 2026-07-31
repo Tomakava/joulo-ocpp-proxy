@@ -1,0 +1,9 @@
+{
+  "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
+  "secondary_csms": [
+    { "url": "wss://analytics.example.com/ocpp" },
+    { "url": "wss://other-backend.example.com/ocpp" }
+  ],
+  "log_level": "info",
+  "log_debug_message_max_length": 120
+}

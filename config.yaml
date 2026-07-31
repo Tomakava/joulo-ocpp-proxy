@@ -1,0 +1,33 @@
+name: "Joulo OCPP Proxy"
+description: "WebSocket proxy for OCPP EV charger traffic. Forwards messages to a primary CSMS and optionally mirrors them to secondary backends."
+version: "1.0.20"
+slug: "joulo_ocpp_proxy"
+url: "https://github.com/tomakava/joulo-ocpp-proxy"
+arch:
+  - amd64
+  - aarch64
+image: "ghcr.io/tomakava/joulo-ocpp-proxy"
+ports:
+  9000/tcp: 9000
+ports_description:
+  9000/tcp: "OCPP WebSocket proxy port"
+options:
+  primary_csms_url: ""
+  secondary_csms: []
+  log_level: "info"
+  log_debug_message_max_length: 120
+schema:
+  primary_csms_url: str
+  secondary_csms:
+    - url: str
+  log_level: list(debug|info|warn|error)?
+  log_debug_message_max_length: int(1,)?
+  # Deprecated: this option was named log_max_message_length up to 1.0.19.
+  # Kept so an upgrade doesn't invalidate saved options; remove in a later release.
+  log_max_message_length: int(1,)?
+startup: application
+boot: auto
+init: false
+homeassistant_api: false
+hassio_api: false
+

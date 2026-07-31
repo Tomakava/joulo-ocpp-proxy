@@ -41,6 +41,51 @@ A secondary failure never affects the charger or the primary link.
 
 ## Quick start
 
+### Home Assistant App
+
+The easiest way to run the proxy on a Home Assistant installation.
+
+**1. Add the repository**
+
+In Home Assistant, go to **Settings → Apps → Install app**, then open the three-dot menu in the top right → **Repositories**, and add:
+
+```
+https://github.com/tomakava/joulo-ocpp-proxy
+```
+
+**2. Install**
+
+After the repository loads, find **Joulo OCPP Proxy** in the store and click **Install**.
+
+**3. Configure**
+
+Go to the app's **Configuration** tab and fill in your settings:
+
+```yaml
+primary_csms_url: "wss://your-primary-csms.example.com/ocpp"
+secondary_csms:
+  - url: "wss://analytics.example.com/ocpp"
+  - url: "wss://other-backend.example.com/ocpp"
+log_level: info
+```
+
+All fields except `primary_csms_url` are optional.
+
+**4. Start**
+
+Click **Start**. The proxy will listen on port 9000. Enable **Start on boot** and **Watchdog** on the Info tab so it restarts automatically.
+
+**5. Point your chargers at the proxy**
+
+Change each charger's OCPP backend URL from the primary CSMS to the proxy's address:
+
+```
+Before: wss://your-csms.example.com/ocpp/CHARGER-001
+After:  ws://<homeassistant-ip>:9000/CHARGER-001
+```
+
+---
+
 ### Using Docker (recommended)
 
 A pre-built image is published automatically to GitHub Container Registry on every push to `main`.
@@ -63,6 +108,13 @@ cp .env.example .env
 docker compose up -d
 ```
 
+To use a JSON config file instead, copy `config.example.json` to `config.json` and
+uncomment the `volumes`/`environment` block in `docker-compose.yml`:
+
+```bash
+cp config.example.json config.json
+```
+
 ### From source
 
 ```bash
@@ -75,17 +127,49 @@ PRIMARY_CSMS_URL=wss://your-csms.example.com/ocpp npm start
 
 ## Configuration
 
-All configuration is done through environment variables:
+### Config file (recommended)
+
+Create a `config.json` file (see `config.example.json`) and point the container at it with `CONFIG_FILE`:
+
+```json
+{
+  "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
+  "secondary_csms": [
+    { "url": "wss://analytics.example.com/ocpp" },
+    { "url": "wss://other-backend.example.com/ocpp" }
+  ],
+  "log_level": "info",
+  "log_debug_message_max_length": 120
+}
+```
+
+Each config file option maps to the environment variable of the same name in
+upper case (`log_level` → `LOG_LEVEL`). Set
+`log_debug_message_max_length` to `""` to disable truncation entirely — the
+Home Assistant options schema only accepts a positive integer, so disabling
+truncation works from a hand-written config file or `LOG_DEBUG_MESSAGE_MAX_LENGTH`,
+not from the add-on's Configuration tab.
+
+An option of the wrong type is reported in the log and ignored, so a typo in the
+config file falls back to the default instead of stopping the proxy. A missing
+`primary_csms_url` is fatal — the proxy logs one line saying so and exits.
+
+### Environment variables
+
+For simple deployments, environment variables are sufficient:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `CONFIG_FILE` | No | `/data/options.json` | Path to the JSON config file |
 | `PORT` | No | `9000` | Port the proxy listens on |
-| `PRIMARY_CSMS_URL` | **Yes** | — | WebSocket URL of your primary CSMS |
+| `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs |
 | `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `PRIMARY_CSMS_URL` |
 | `SECONDARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `SECONDARY_CSMS_URLS` |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
 | `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No | `120` | Max char length for debug payload summaries. Leave empty to disable truncation |
+
+\* Required if not set in the config file. Environment variables take precedence over the config file.
 
 ## Charger setup
 
@@ -166,7 +250,7 @@ Leave it unset for the default, or set it empty to disable truncation.
 docker build -t joulo-ocpp-proxy .
 ```
 
-The image uses a multi-stage build and runs as a non-root user (`node`).
+The image uses a multi-stage build. The Home Assistant add-on runs it as root (per the add-on contract); the bundled `docker-compose.yml` sets `user: node` so plain Docker deployments run unprivileged.
 
 ## Contributing
 
