@@ -49,9 +49,22 @@ Because charger sessions can stay open for days or weeks, secondaries get a few 
 
 - **Auto-reconnect** — if a secondary disconnects, the proxy reconnects after 10s and keeps retrying until the charger session ends.
 - **Keepalive ping** — the proxy sends a WebSocket ping to each secondary every 30s so idle connections aren't dropped by load balancers or CSMS timeouts.
-- **Bounded queue** — while a secondary is reconnecting, up to 100 messages per secondary are buffered and replayed once it's back. Older messages are dropped first if the buffer fills.
+- **Acknowledged delivery** — every mirrored frame goes through a per-secondary outbox and stays there until that secondary answers it. Unanswered frames are resent, and the outbox replays in order on reconnect.
 
 A secondary failure never affects the charger or the primary link.
+
+#### Acknowledged delivery
+
+A socket can go half-open: `send()` reports success and the connection still looks open, but nothing reaches the peer and TCP doesn't report the failure for a long time. A frame written in that window looks delivered and would be lost silently. The only reliable signal is the secondary's own reply, so that is what the proxy waits for.
+
+- A mirrored CALL is held until that secondary answers with a `CALLRESULT` or `CALLERROR`.
+- **At most one CALL is in flight per secondary.** MeterValues can't be rewritten until the StartTransaction ahead of it has come back with that secondary's transaction ID, so the queue is strictly ordered.
+- An unanswered CALL is resent after 120s. After two ack timeouts it's given up on, so one message a secondary never answers can't stall the mirror. A dropped connection doesn't count as a timeout — the frame simply goes out again on the new one.
+- Up to 100 frames per secondary are held. If it fills, the oldest *waiting* frame is dropped (never the in-flight one, whose ack releases everything behind it).
+
+**Your secondary must answer mirrored CALLs.** A secondary that ignores an action will see it resent once and then dropped. Every action is retried, including the non-transaction ones OCPP 1.6 tells a Charge Point not to resend — a mirror is not a Charge Point, and a dropped StatusNotification leaves that secondary's view of the connector stale until the next state change.
+
+A resent StartTransaction may open a second transaction on that secondary, since OCPP 1.6 has the Central System accept every one and offers no deduplication. That's the deliberate trade: losing it is worse, because without the reply there is no transaction ID mapping and every MeterValues for the rest of the session carries the primary's ID instead.
 
 ## Quick start
 

@@ -1,6 +1,6 @@
 name: "Joulo OCPP Proxy"
 description: "WebSocket proxy for OCPP EV charger traffic. Forwards messages to a primary CSMS and mirrors them to secondary backends, globally or per charger."
-version: "1.0.20"
+version: "1.0.21"
 slug: "joulo_ocpp_proxy"
 url: "https://github.com/tomakava/joulo-ocpp-proxy"
 arch:
