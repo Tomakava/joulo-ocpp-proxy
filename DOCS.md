@@ -138,6 +138,9 @@ until the charger has replied, and the primary's requests always go first. If
 the charger can't be reached or doesn't answer within 30 seconds, the secondary
 gets an error reply instead.
 
+Each secondary must reply to the messages it receives, as a normal backend
+does. The proxy waits for each reply before sending the next message, resends
+an unanswered message after 2 minutes, and skips it after a second timeout.
 While a secondary is unreachable, the proxy keeps the most recent 100 messages
 for it, reconnects every 10 seconds and sends them in order once it's back.
 
@@ -168,6 +171,11 @@ is an empty **Primary CSMS URL**.
   set **Add charger ID to mirror URLs** to match.
 - `Unexpected server response: 401` (or `403`) means the backend refused the
   credentials. Check **Charger ID on this backend** and **Backend password**.
+
+**A secondary shows charging sessions twice.** When a start-of-charging
+message goes unanswered, it is resent. OCPP 1.6 gives the backend no ID to
+tell the copy from a new session, so some backends record it twice. Check
+that the backend answers promptly.
 
 ## Support
 
