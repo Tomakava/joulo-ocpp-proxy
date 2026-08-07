@@ -31,9 +31,10 @@ import { resolveCsmsUrl } from "./utils/url";
  * - Only the primary CSMS can send commands back to the charger, apart from
  *   the read-only diagnostics in SECONDARY_FORWARDED_ACTIONS.
  * - Secondary connections are best-effort; failures never affect the
- *   charger or the primary link. Secondaries auto-reconnect, send
- *   periodic keepalive pings, and buffer a small bounded queue of
- *   messages while reconnecting so brief blips don't lose data.
+ *   charger or the primary link. Secondaries auto-reconnect and send periodic
+ *   keepalive pings. Every mirrored frame goes through a bounded per-secondary
+ *   outbox and stays there until that secondary answers it, so frames lost to a
+ *   half-open socket — where send() succeeds but nothing arrives — are resent.
  * - A secondary may know the charger under a different ID and expect its own
  *   credentials and idTag (configured via charger_mappings). Mirrored frames
  *   are rewritten per secondary:
@@ -56,6 +57,42 @@ const SECONDARY_RECONNECT_DELAY_MS = 10_000;
 const SECONDARY_KEEPALIVE_INTERVAL_MS = 30_000;
 const SECONDARY_PONG_TIMEOUT_MS = 90_000;
 const SECONDARY_MAX_QUEUE = 100;
+
+/**
+ * How long a mirrored CALL may go unanswered before it is sent again. Sized
+ * against how long a live socket takes to answer, not against outages: the timer
+ * is cleared whenever the socket closes, so a reconnect never spends this budget.
+ *
+ * Kept above SECONDARY_PONG_TIMEOUT_MS, which is the real half-open-socket
+ * detector — a peer that stops answering pings gets force-closed and the outbox
+ * replays on a fresh connection. This is only the backstop for a frame lost on a
+ * socket that stays healthy.
+ */
+const SECONDARY_ACK_TIMEOUT_MS = 120_000;
+
+/**
+ * Ack timeouts a mirrored CALL may collect before it is given up on, so one
+ * message a secondary never answers can't stall the mirror forever.
+ *
+ * Every action is retried, including the non-transaction ones OCPP 1.6 tells a
+ * Charge Point not to resend. A mirror is not a Charge Point: its secondary sees
+ * only what this proxy pushes, so a dropped StatusNotification leaves that
+ * secondary's idea of the connector wrong until the next state change. Retrying
+ * can't reorder state either — the outbox is ordered, so a newer frame queues
+ * behind the stuck one rather than overtaking it.
+ *
+ * A resent StartTransaction may open a second transaction, since OCPP 1.6 has a
+ * Central System accept every one and offers no deduplication. Losing it is
+ * worse: without the reply there is no transactionId mapping for the rest of the
+ * session, and every MeterValues behind it carries the primary's ID instead.
+ */
+const SECONDARY_MAX_ACK_TIMEOUTS = 2;
+
+/**
+ * Cap on remembered StartTransaction results. A retry can need one long after
+ * the primary replied, so they outlive the CALL and are bounded here instead.
+ */
+const MAX_TRACKED_START_TX = 200;
 
 /** Read-only CALL actions from a secondary that are relayed to the charger. */
 const SECONDARY_FORWARDED_ACTIONS = new Set([
@@ -88,6 +125,24 @@ const SECONDARY_REJECTED_ACTIONS = new Set([
   "UpdateFirmware",
 ]);
 
+/**
+ * One frame mirrored to a secondary, held until that secondary answers it.
+ *
+ * The parsed message is kept rather than the encoded frame, because the rewrite
+ * depends on state that moves while an entry waits: a MeterValues queued behind
+ * an unanswered StartTransaction has no transactionId mapping yet.
+ */
+interface OutboxEntry {
+  /** Parsed CALL, or null for a frame this proxy could not decode. */
+  msg: ParsedMessage | null;
+  /** The frame as the charger sent it, mirrored verbatim when msg is null. */
+  raw: string;
+  /** When the current attempt was written; null when not in flight. */
+  sentAt: number | null;
+  /** Ack timeouts, not sends — a dropped connection must not burn a retry. */
+  timeouts: number;
+}
+
 interface SecondaryState {
   /** Configured backend URL, also the identity used in logs. */
   url: string;
@@ -98,7 +153,11 @@ interface SecondaryState {
   /** Hardcoded idTag substituted into every mirrored StartTransaction. */
   idTag?: string;
   ws: WebSocket | null;
-  queue: string[];
+  /** Mirrored frames awaiting acknowledgement, oldest first; only the head is
+   * ever in flight. */
+  outbox: OutboxEntry[];
+  /** Fires when the in-flight head goes unanswered for too long. */
+  ackTimer: ReturnType<typeof setTimeout> | null;
   keepalive: ReturnType<typeof setInterval> | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   lastPongAt: number;
@@ -147,7 +206,8 @@ export class ChargerConnection {
         password: target.password,
         idTag: target.idTag,
         ws: null,
-        queue: [],
+        outbox: [],
+        ackTimer: null,
         keepalive: null,
         reconnectTimer: null,
         lastPongAt: Date.now(),
@@ -155,7 +215,7 @@ export class ChargerConnection {
         pendingSecondaryTxIds: new Map(),
       };
       this.secondaries.push(state);
-      state.ws = this.connectSecondary(state);
+      this.connectSecondary(state);
     }
 
     this.charger.on("message", (data) => {
@@ -200,12 +260,7 @@ export class ChargerConnection {
       }
 
       for (const sec of this.secondaries) {
-        // An undecodable frame is mirrored byte-for-byte: there is nothing to
-        // rewrite, and dropping it would lose data the secondary expects.
-        const frame = msg === null ? raw : this.rewriteForSecondary(sec, msg);
-        if (!this.sendToSecondary(sec, frame)) {
-          this.enqueueForSecondary(sec, frame);
-        }
+        this.mirrorToSecondary(sec, msg, raw);
       }
     });
 
@@ -321,7 +376,7 @@ export class ChargerConnection {
     const primaryTxId = readTransactionId(msg.payload);
     if (primaryTxId === null) return;
 
-    this.primaryTxIdByMsgId.set(msg.id, primaryTxId);
+    this.rememberPrimaryTxId(msg.id, primaryTxId);
 
     for (const sec of this.secondaries) {
       const secondaryTxId = sec.pendingSecondaryTxIds.get(msg.id);
@@ -340,7 +395,7 @@ export class ChargerConnection {
    * send periodic keepalive pings so idle connections aren't dropped by
    * intermediaries.
    */
-  private connectSecondary(state: SecondaryState): WebSocket {
+  private connectSecondary(state: SecondaryState): void {
     const ws = new WebSocket(
       state.resolvedUrl,
       this.protocol ? [this.protocol] : OCPP_SUBPROTOCOLS,
@@ -350,10 +405,20 @@ export class ChargerConnection {
       }
     );
 
+    // Adopt the socket before wiring handlers, so a drain triggered from one
+    // writes to this connection rather than the one it replaced.
+    state.ws = ws;
+
     ws.on("open", () => {
       this.log.info("secondary connected", { url: state.resolvedUrl });
       state.lastPongAt = Date.now();
-      this.flushSecondaryQueue(state, ws);
+      if (state.outbox.length > 0) {
+        this.log.info("secondary replaying unacknowledged messages", {
+          url: state.url,
+          count: state.outbox.length,
+        });
+      }
+      this.drainOutbox(state);
       this.startSecondaryKeepalive(state, ws);
     });
 
@@ -379,6 +444,11 @@ export class ChargerConnection {
       if (msg.type === OCPP_MSG_CALLRESULT) {
         this.captureSecondaryTransactionId(state, msg);
       }
+
+      // Only a CALLRESULT or CALLERROR reaches here, and either completes a
+      // mirrored CALL. Last, because releasing the frame behind it may need the
+      // mapping captured just above.
+      this.acknowledgeOutboxEntry(state, msg);
     });
 
     ws.on("pong", () => {
@@ -392,6 +462,7 @@ export class ChargerConnection {
         reason: reason.toString(),
       });
       this.stopSecondaryKeepalive(state);
+      this.abandonInFlight(state);
       this.scheduleSecondaryReconnect(state);
     });
 
@@ -401,8 +472,6 @@ export class ChargerConnection {
         error: err.message,
       });
     });
-
-    return ws;
   }
 
   /**
@@ -478,6 +547,20 @@ export class ChargerConnection {
     }
   }
 
+  /**
+   * Remember what the primary assigned to a StartTransaction. Entries outlive
+   * the CALL because a retry may need one later, so trim oldest-first.
+   */
+  private rememberPrimaryTxId(msgId: string, primaryTxId: string): void {
+    this.primaryTxIdByMsgId.set(msgId, primaryTxId);
+
+    while (this.primaryTxIdByMsgId.size > MAX_TRACKED_START_TX) {
+      const oldest = this.primaryTxIdByMsgId.keys().next().value;
+      if (oldest === undefined) break;
+      this.primaryTxIdByMsgId.delete(oldest);
+    }
+  }
+
   private mapTransactionId(
     state: SecondaryState,
     primaryTxId: string,
@@ -496,6 +579,9 @@ export class ChargerConnection {
    * Return the frame to mirror to one secondary, applying the rewrites that
    * secondary's identity needs. Falls back to the original frame when nothing
    * has to change.
+   *
+   * Pure, and called on every send attempt: a retry must see the transactionId
+   * mapping as it stands then, not as it stood when the frame was queued.
    */
   private rewriteForSecondary(
     state: SecondaryState,
@@ -528,14 +614,8 @@ export class ChargerConnection {
         return msg.raw;
       }
 
-      const key = String(rawTxId);
-      const mapped = state.txIdMap.get(key);
+      const mapped = state.txIdMap.get(String(rawTxId));
       if (mapped === undefined) return msg.raw;
-
-      if (action === "StopTransaction") {
-        state.txIdMap.delete(key);
-        this.store.delete(this.chargePointId, state.url, key);
-      }
 
       return encodeCall(msg.id, action, {
         ...payload,
@@ -547,8 +627,9 @@ export class ChargerConnection {
   }
 
   /**
-   * Mirror one frame to a secondary. Returns false when the frame could not be
-   * handed off, so the caller can queue it for the next reconnect.
+   * Write one frame to a secondary's socket. Returns false when it could not be
+   * handed off at all — a true return only means the frame reached the write
+   * path, never that the secondary received it.
    */
   private sendToSecondary(state: SecondaryState, raw: string): boolean {
     if (state.ws?.readyState !== WebSocket.OPEN) return false;
@@ -564,31 +645,173 @@ export class ChargerConnection {
     }
   }
 
-  private enqueueForSecondary(state: SecondaryState, raw: string) {
-    if (state.queue.length >= SECONDARY_MAX_QUEUE) {
-      state.queue.shift();
+  /**
+   * Queue one frame for a secondary and start it moving. Everything goes
+   * through the outbox whether the socket is up or not: a frame is only done
+   * once answered, and one ordered queue is what keeps a replay sequential.
+   */
+  private mirrorToSecondary(
+    state: SecondaryState,
+    msg: ParsedMessage | null,
+    raw: string
+  ): void {
+    this.enqueueForSecondary(state, { msg, raw, sentAt: null, timeouts: 0 });
+    this.drainOutbox(state);
+  }
+
+  private enqueueForSecondary(state: SecondaryState, entry: OutboxEntry) {
+    if (state.outbox.length >= SECONDARY_MAX_QUEUE) {
+      // Drop the oldest *waiting* frame, never the in-flight head: its ack is
+      // what releases everything behind it.
+      const index = state.outbox[0].sentAt === null ? 0 : 1;
+      const [dropped] = state.outbox.splice(index, 1);
       this.log.warn("secondary queue full, dropping oldest message", {
         url: state.url,
         max: SECONDARY_MAX_QUEUE,
+        action: dropped.msg?.action,
       });
     }
-    state.queue.push(raw);
+    state.outbox.push(entry);
   }
 
-  private flushSecondaryQueue(state: SecondaryState, ws: WebSocket) {
-    if (state.queue.length === 0) return;
-    this.log.info("secondary flushing queued messages", {
-      url: state.url,
-      count: state.queue.length,
-    });
-    for (const msg of state.queue) {
-      try {
-        ws.send(msg);
-      } catch {
-        /* best-effort */
+  /**
+   * Send as much of the outbox as can go now, keeping at most one CALL in
+   * flight. The sequencing is load-bearing: a mirrored MeterValues can't be
+   * rewritten until the StartTransaction ahead of it has been answered.
+   */
+  private drainOutbox(state: SecondaryState): void {
+    while (state.outbox.length > 0) {
+      if (state.ws?.readyState !== WebSocket.OPEN) return;
+
+      const entry = state.outbox[0];
+      // An attempt is already in flight; its ack resumes the drain.
+      if (entry.sentAt !== null) return;
+
+      // An undecodable frame is mirrored byte-for-byte: there is nothing to
+      // rewrite, and dropping it would lose data the secondary expects.
+      const frame =
+        entry.msg === null
+          ? entry.raw
+          : this.rewriteForSecondary(state, entry.msg);
+
+      // Left queued on failure — the reconnect replays from here.
+      if (!this.sendToSecondary(state, frame)) return;
+
+      // Only a CALL has an answer to wait for; anything else is done once written.
+      if (entry.msg?.type !== OCPP_MSG_CALL) {
+        state.outbox.shift();
+        continue;
       }
+
+      entry.sentAt = Date.now();
+      this.startAckTimer(state);
+      return;
     }
-    state.queue = [];
+  }
+
+  /**
+   * Mark the in-flight frame delivered and release the next. Only the head is
+   * ever in flight, so any other answer is for a frame already given up on.
+   */
+  private acknowledgeOutboxEntry(
+    state: SecondaryState,
+    reply: ParsedMessage
+  ): void {
+    if (state.outbox.length === 0) return;
+
+    const entry = state.outbox[0];
+    if (entry.sentAt === null) return;
+    // An undecodable frame has no ID, so it never matches and never waits.
+    if (entry.msg?.id !== reply.id) return;
+
+    state.outbox.shift();
+    this.clearAckTimer(state);
+
+    // Either reply settles it: the charger's transaction is over regardless of
+    // whether this secondary accepted the stop, so the mapping is spent.
+    this.releaseStoppedTransaction(state, entry.msg);
+
+    this.drainOutbox(state);
+  }
+
+  /**
+   * An answered StopTransaction has spent its mapping. Waiting for the answer
+   * rather than dropping it at send time is what lets a retry rewrite the same
+   * transactionId again.
+   */
+  private releaseStoppedTransaction(
+    state: SecondaryState,
+    sent: ParsedMessage
+  ): void {
+    if (sent.action !== "StopTransaction") return;
+    if (typeof sent.payload !== "object" || sent.payload === null) return;
+
+    // The charger's own frame, so this is the primary ID the map is keyed by.
+    const rawTxId = (sent.payload as Record<string, unknown>).transactionId;
+    if (typeof rawTxId !== "number" && typeof rawTxId !== "string") return;
+
+    const key = String(rawTxId);
+    if (!state.txIdMap.delete(key)) return;
+    this.store.delete(this.chargePointId, state.url, key);
+  }
+
+  /**
+   * The in-flight frame went unanswered. A send() that "succeeded" into a
+   * half-open socket looks exactly like this, so resend rather than assume
+   * delivery — bounded, so a never-answered frame can't hold the mirror shut.
+   */
+  private handleAckTimeout(state: SecondaryState): void {
+    if (state.outbox.length === 0) return;
+
+    const entry = state.outbox[0];
+    if (entry.sentAt === null) return;
+
+    entry.sentAt = null;
+    entry.timeouts += 1;
+
+    const gaveUp = entry.timeouts >= SECONDARY_MAX_ACK_TIMEOUTS;
+    if (gaveUp) state.outbox.shift();
+
+    this.log.warn(
+      gaveUp
+        ? "secondary never acknowledged mirrored message, giving up"
+        : "secondary did not acknowledge mirrored message, retrying",
+      {
+        url: state.url,
+        action: entry.msg?.action,
+        timeouts: entry.timeouts,
+        queued: state.outbox.length,
+      }
+    );
+
+    this.drainOutbox(state);
+  }
+
+  /**
+   * The socket carrying the in-flight frame is gone, so its answer can never
+   * arrive. Hand the frame back to the next connection without charging it a
+   * retry.
+   */
+  private abandonInFlight(state: SecondaryState): void {
+    this.clearAckTimer(state);
+    if (state.outbox.length === 0) return;
+
+    state.outbox[0].sentAt = null;
+  }
+
+  private startAckTimer(state: SecondaryState) {
+    this.clearAckTimer(state);
+    state.ackTimer = setTimeout(() => {
+      state.ackTimer = null;
+      this.handleAckTimeout(state);
+    }, SECONDARY_ACK_TIMEOUT_MS);
+  }
+
+  private clearAckTimer(state: SecondaryState) {
+    if (state.ackTimer !== null) {
+      clearTimeout(state.ackTimer);
+      state.ackTimer = null;
+    }
   }
 
   private startSecondaryKeepalive(state: SecondaryState, ws: WebSocket) {
@@ -631,7 +854,7 @@ export class ChargerConnection {
     state.reconnectTimer = setTimeout(() => {
       state.reconnectTimer = null;
       if (!this.alive) return;
-      state.ws = this.connectSecondary(state);
+      this.connectSecondary(state);
     }, SECONDARY_RECONNECT_DELAY_MS);
   }
 
@@ -669,11 +892,12 @@ export class ChargerConnection {
 
     for (const sec of this.secondaries) {
       this.stopSecondaryKeepalive(sec);
+      this.clearAckTimer(sec);
       if (sec.reconnectTimer !== null) {
         clearTimeout(sec.reconnectTimer);
         sec.reconnectTimer = null;
       }
-      sec.queue = [];
+      sec.outbox = [];
     }
 
     const close = (ws: WebSocket | null) => {

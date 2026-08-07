@@ -64,6 +64,27 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+    await sleep(10);
+  }
+}
+
+/** An OCPP frame's elements, or null when the text isn't a JSON array. */
+function tryParseFrame(raw: string): [number, string, ...unknown[]] | null {
+  try {
+    const frame: unknown = JSON.parse(raw);
+    return Array.isArray(frame) ? (frame as [number, string, ...unknown[]]) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function connectWhenOpen(
   url: string,
   protocol: string,
@@ -614,7 +635,17 @@ describe("proxy feature", () => {
 
     const secondaryFrames: string[] = [];
     secondaryConn.on("message", (data) => {
-      secondaryFrames.push(rawDataToString(data));
+      const raw = rawDataToString(data);
+      secondaryFrames.push(raw);
+
+      // The proxy mirrors one CALL at a time and waits for the answer, so this
+      // stand-in CSMS has to answer like a real one or nothing behind the first
+      // frame ships. start-1 is left alone: the test answers that one itself,
+      // with the transaction ID this secondary assigns.
+      const frame = tryParseFrame(raw);
+      if (frame?.[0] === 2 && frame[1] !== "start-1") {
+        secondaryConn.send(JSON.stringify([3, frame[1], {}]));
+      }
     });
 
     // BootNotification: the serial number is rewritten to the mapped ID.
@@ -628,6 +659,11 @@ describe("proxy feature", () => {
       '[2,"start-1","StartTransaction",{"connectorId":1,"idTag":"CARD-1","meterStart":0}]'
     );
     await primaryStart;
+
+    // The mirror is sequential, so start-1 only goes out once boot-1 has been
+    // answered. Wait for it to actually arrive before answering it — an answer
+    // to a frame still queued is not an acknowledgement of anything.
+    await waitFor(() => secondaryFrames.length >= 2);
 
     // Each CSMS assigns its own transaction ID.
     primaryConn.send('[3,"start-1",{"transactionId":111,"idTagInfo":{"status":"Accepted"}}]');
