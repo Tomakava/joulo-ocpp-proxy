@@ -5,7 +5,32 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - actions/*
+      docker:
+        patterns:
+          - docker/*
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      runtime:
+        patterns:
+          - ws
+      dev-common:
+        patterns:
+          - '@eslint/*'
+          - '@types/*'
+          - '@typescript-eslint/*'
+          - 'typescript-eslint'
+          - '@vitest/*'
+          - eslint
+          - typescript
+          - vitest
+    ignore:
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
