@@ -1,5 +1,5 @@
 name: "Joulo OCPP Proxy"
-description: "WebSocket proxy for OCPP EV charger traffic. Forwards messages to a primary CSMS and optionally mirrors them to secondary backends."
+description: "WebSocket proxy for OCPP EV charger traffic. Forwards messages to a primary CSMS and mirrors them to secondary backends, globally or per charger."
 version: "1.0.23"
 slug: "joulo_ocpp_proxy"
 url: "https://github.com/tomakava/joulo-ocpp-proxy"
@@ -16,6 +16,7 @@ options:
   primary_csms_append_charge_point_id: true
   secondary_csms: []
   secondary_csms_append_charge_point_id: true
+  charger_mappings: []
   log_level: "info"
   log_debug_message_max_length: 120
 schema:
@@ -24,6 +25,12 @@ schema:
   secondary_csms:
     - url: str
   secondary_csms_append_charge_point_id: bool?
+  charger_mappings:
+    - secondary_url: str
+      charger_id: str
+      mapped_charger_id: str?
+      password: password?
+      id_tag: str?
   log_level: list(debug|info|warn|error)?
   # 0 disables truncation.
   log_debug_message_max_length: int(0,)?
