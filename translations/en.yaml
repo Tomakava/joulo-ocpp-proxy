@@ -12,7 +12,7 @@ configuration:
       Adds /<charger ID> to the primary CSMS URL. Turn off if the backend gave
       you a complete URL that already identifies the charger.
   secondary_csms:
-    name: Mirror to backends
+    name: Mirror to backends (all chargers)
     description: >-
       Extra backends that receive a copy of the traffic from every charger,
       under the charger's own ID. Their replies are never sent to the charger.
@@ -25,8 +25,41 @@ configuration:
   secondary_csms_append_charge_point_id:
     name: Add charger ID to mirror URLs
     description: >-
-      Adds /<charger ID> to every mirror backend URL. Turn off if your mirror
-      URLs already identify the charger.
+      Adds /<charger ID> to every mirror backend URL (for per-charger mirrors,
+      the charger ID on that backend). Turn off if your mirror URLs already
+      identify the charger.
+  charger_mappings:
+    name: Mirror to backends (per charger)
+    description: >-
+      Mirror one specific charger to a backend, optionally under a different
+      identity. Add one entry per charger and backend pair.
+    fields:
+      charger_id:
+        name: Charger ID
+        description: >-
+          ID the charger connects to this proxy with, i.e. the last part of
+          its OCPP URL (ws://proxy-host:9000/CHARGER-001 → CHARGER-001).
+      secondary_url:
+        name: Backend URL
+        description: >-
+          WebSocket URL of the backend this charger is mirrored to, e.g.
+          wss://analytics.example.com/ocpp.
+      mapped_charger_id:
+        name: Charger ID on this backend
+        description: >-
+          Use when the backend knows this charger under a different ID. Leave
+          empty to use the charger's own ID.
+      password:
+        name: Backend password
+        description: >-
+          Password for HTTP Basic auth on this backend. The username is the
+          charger ID on this backend. Leave empty to reuse the charger's own
+          credentials.
+      id_tag:
+        name: RFID tag (idTag) on this backend
+        description: >-
+          Replaces the idTag in StartTransaction sent to this backend, for
+          backends that only accept their own tags. OCPP 1.6 only.
   log_level:
     name: Log level
     description: >-
