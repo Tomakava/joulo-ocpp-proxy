@@ -21,7 +21,10 @@ export interface ParsedMessage {
   type: OcppMessageType;
   id: string;
   raw: string;
+  /** CALL only. */
   action?: string;
+  /** CALL and CALLRESULT payload; absent for CALLERROR. */
+  payload?: unknown;
 }
 
 /**

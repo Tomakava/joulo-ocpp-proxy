@@ -8,8 +8,8 @@ system, or to try a new platform before switching over, without touching the
 charger's contract with its current backend.
 
 Only the primary controls the charger. Secondaries see what the charger
-reports (boot, status, meter values, start/stop of charging) ; anything they
-send back is ignored. If a secondary is
+reports (boot, status, meter values, start/stop of charging) and may read
+diagnostics, but anything they try to control is refused. If a secondary is
 down, the charger and the primary are not affected.
 
 ## Setup
@@ -57,7 +57,7 @@ charger, e.g. `wss://fixed-csms.example.com/XXXXXXXX`, and enter that full URL
 as **Primary CSMS URL**. With it off, every charger connected to the proxy
 reaches that same URL, so use it with a single charger.
 
-### Mirror to backends
+### Mirror to backends (all chargers)
 
 Backends that receive a copy of the traffic from **every** charger connected
 to the proxy, under the charger's own ID and with the charger's own username
@@ -68,14 +68,47 @@ secondary_csms:
   - url: "wss://analytics.example.com/ocpp"
 ```
 
-Chargers are connected to the primary only unless mirrors are listed here.
+### Mirror to backends (per charger)
+
+Mirror **one** charger to a backend. Add one entry per charger and backend
+pair; the same backend can appear in several entries for different chargers.
+
+```yaml
+charger_mappings:
+  - charger_id: CHARGER-001
+    secondary_url: "wss://analytics.example.com/ocpp"
+  - charger_id: CHARGER-001
+    secondary_url: "wss://other-backend.example.com/ocpp"
+    mapped_charger_id: ext-CHARGER-001
+    password: secret123
+    id_tag: HARDCODED-TAG
+```
+
+| Option | Required | What it does |
+|---|---|---|
+| **Charger ID** (`charger_id`) | Yes | ID the charger connects to the proxy with — the last part of its URL. Must match exactly. |
+| **Backend URL** (`secondary_url`) | Yes | Backend to mirror this charger to, without a charger ID at the end. |
+| **Charger ID on this backend** (`mapped_charger_id`) | No | Use when the backend has registered this charger under a different ID. The proxy connects with this ID and uses it in the charger's boot message. |
+| **Backend password** (`password`) | No | Password this backend expects. The username sent is the charger ID on this backend. When empty, the charger's own username and password are reused. |
+| **RFID tag on this backend** (`id_tag`) | No | Replaces the RFID tag in every charging session sent to this backend. Useful when the backend only accepts tags it knows. |
+
+A charger with no entries here, and nothing under *all chargers*, is
+connected to the primary only.
 
 ### Add charger ID to mirror URLs
 
-On by default: the proxy adds `/<charger ID>` to every mirror URL, so
-`wss://analytics.example.com/ocpp` becomes
-`wss://analytics.example.com/ocpp/CHARGER-001`. Turn it off when your mirror
-URLs already identify the charger. It applies to all mirrors at once.
+On by default: the proxy adds `/<charger ID>` to every mirror URL, using
+**Charger ID on this backend** for per-charger mirrors when it's set. For
+example, `wss://analytics.example.com/ocpp` becomes
+`wss://analytics.example.com/ocpp/ext-CHARGER-001`.
+
+Turn it off when your mirror URLs already identify the charger. It applies to
+all mirrors at once, both *all chargers* and *per charger*.
+
+> **OCPP 1.6 only:** *RFID tag on this backend* and the charger ID in the boot
+> message only take effect for chargers using OCPP 1.6. For OCPP 2.0.1
+> chargers the backend is still reached under its mapped ID and password, but
+> the messages are passed on unchanged.
 
 ### Log level
 
@@ -90,12 +123,26 @@ is 120. Set `0` to show complete messages, e.g. to see full meter values.
 
 ## What secondaries can do
 
-Secondaries receive every message the charger sends. Their replies, and any
-commands they send, are logged and ignored, so they can never control the
-charger.
+| Command from a secondary | Result |
+|---|---|
+| `TriggerMessage`, `GetConfiguration` | Passed to the charger; the answer goes back to that secondary |
+| Commands that control the charger (`RemoteStartTransaction`, `Reset`, …) | Refused by the proxy; the charger never sees them |
+| Anything else | Answered with `NotSupported` |
+
+A charger handles one backend request at a time. When the primary is waiting
+for an answer, a secondary's `TriggerMessage` or `GetConfiguration` waits
+until the charger has replied, and the primary's requests always go first. If
+the charger can't be reached or doesn't answer within 30 seconds, the secondary
+gets an error reply instead.
 
 While a secondary is unreachable, the proxy keeps the most recent 100 messages
 for it, reconnects every 10 seconds and sends them in order once it's back.
+
+For OCPP 1.6 chargers, each backend gives out its own transaction numbers. The
+proxy translates them so that meter values and stop messages reach each
+secondary with the number that secondary gave. These translations are kept
+in memory, so restarting the app in the middle of a charging session breaks
+them until the next session.
 
 ## Troubleshooting
 
@@ -112,10 +159,12 @@ is an empty **Primary CSMS URL**.
 - Look for `secondary error` or `secondary disconnected` lines with the
   secondary's URL. Set **Log level** to `debug` to also see the messages sent
   to it.
+- For *per charger* mirrors, check that **Charger ID** matches the ID in the
+  `session started` log line exactly.
 - Check whether the backend expects the charger ID at the end of its URL, and
   set **Add charger ID to mirror URLs** to match.
 - `Unexpected server response: 401` (or `403`) means the backend refused the
-  charger's username and password.
+  credentials. Check **Charger ID on this backend** and **Backend password**.
 
 ## Support
 
