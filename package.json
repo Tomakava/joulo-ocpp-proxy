@@ -22,15 +22,18 @@
     "electric-vehicle",
     "charge-point"
   ],
-  "author": "Joulo B.V. <info@joulo.nl> (https://joulo.nl)",
+  "author": "Tomakava (https://github.com/tomakava)",
+  "contributors": [
+    "Joulo B.V. <info@joulo.nl> (https://joulo.nl)"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/joulo-nl/joulo-ocpp-proxy.git"
+    "url": "https://github.com/tomakava/joulo-ocpp-proxy.git"
   },
-  "homepage": "https://github.com/joulo-nl/joulo-ocpp-proxy",
+  "homepage": "https://github.com/tomakava/joulo-ocpp-proxy",
   "bugs": {
-    "url": "https://github.com/joulo-nl/joulo-ocpp-proxy/issues"
+    "url": "https://github.com/tomakava/joulo-ocpp-proxy/issues"
   },
   "engines": {
     "node": ">=24"
