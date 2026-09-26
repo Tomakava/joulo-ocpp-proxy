@@ -1,4 +1,4 @@
-# Joulo OCPP Proxy
+# OCPP Mirror Proxy
 
 This app sits between your EV chargers and their backend (CSMS). Every charger
 keeps talking to its usual backend — the **primary** — while the proxy sends a

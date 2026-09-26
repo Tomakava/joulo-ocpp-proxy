@@ -1,4 +1,8 @@
-# joulo-ocpp-proxy
+# OCPP Mirror Proxy
+
+> Fork of [joulo-nl/joulo-ocpp-proxy](https://github.com/joulo-nl/joulo-ocpp-proxy) by [Joulo](https://joulo.nl). It adds
+> per-charger mirrors, transaction ID translation that survives restarts,
+> acknowledged delivery to secondaries, and a Home Assistant add-on.
 
 A lightweight **OCPP WebSocket proxy** that sits between your EV chargers and one or more CSMS backends. It forwards all traffic to a **primary CSMS** and mirrors it to **secondary backends** on a per-charger basis — perfect for monitoring, analytics, or migrating between platforms without reconfiguring your chargers.
 
@@ -89,7 +93,7 @@ https://github.com/tomakava/joulo-ocpp-proxy
 
 **2. Install**
 
-After the repository loads, find **Joulo OCPP Proxy** in the store and click **Install**.
+After the repository loads, find **OCPP Mirror Proxy** in the store and click **Install**.
 
 **3. Configure and start**
 
@@ -107,7 +111,7 @@ docker run -d \
   -p 9000:9000 \
   -e PRIMARY_CSMS_URL=wss://your-primary-csms.example.com/ocpp \
   -v $(pwd)/data:/data \
-  ghcr.io/joulo-nl/joulo-ocpp-proxy:main
+  ghcr.io/tomakava/joulo-ocpp-proxy:main
 ```
 
 Global mirrors can be set with `SECONDARY_CSMS_URLS`. Per-charger mirroring is configured via `charger_mappings` in a JSON config file (see below) — that part has no env-var equivalent. Mounting `/data` keeps transaction ID mappings across restarts.
@@ -115,7 +119,7 @@ Global mirrors can be set with `SECONDARY_CSMS_URLS`. Per-charger mirroring is c
 ### Using Docker Compose
 
 ```bash
-git clone https://github.com/joulo-nl/joulo-ocpp-proxy.git
+git clone https://github.com/tomakava/joulo-ocpp-proxy.git
 cd joulo-ocpp-proxy
 cp .env.example .env
 # Edit .env with your CSMS URLs
@@ -138,7 +142,7 @@ cp config.example.json data/config.json
 ### From source
 
 ```bash
-git clone https://github.com/joulo-nl/joulo-ocpp-proxy.git
+git clone https://github.com/tomakava/joulo-ocpp-proxy.git
 cd joulo-ocpp-proxy
 npm install
 npm run build
@@ -342,9 +346,14 @@ Contributions are welcome! Please open an issue first to discuss what you'd like
 
 ## About
 
-This project is maintained by [Joulo](https://joulo.nl) — a Dutch platform that helps EV owners earn rewards for charging at home with green energy. We built this proxy to solve a real-world need: connecting chargers to multiple backends without vendor lock-in.
+This fork is maintained by [Tomakava](https://github.com/tomakava). Report
+problems with it in [this repository's issues](https://github.com/tomakava/joulo-ocpp-proxy/issues),
+not upstream.
 
-If you're interested in smart EV charging and renewable energy, check us out at [joulo.nl](https://joulo.nl).
+The original proxy was built by [Joulo](https://joulo.nl), a Dutch platform that
+helps EV owners earn rewards for charging at home with green energy. Changes that
+are useful beyond this fork are offered back to
+[joulo-nl/joulo-ocpp-proxy](https://github.com/joulo-nl/joulo-ocpp-proxy).
 
 ## License
 
