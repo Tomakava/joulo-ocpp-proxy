@@ -6,11 +6,16 @@ services:
       - "9000:9000"
     env_file:
       - .env
+    volumes:
+      # Persistent data directory. Holds state.json, written by the proxy to
+      # preserve secondary transaction ID mappings across restarts so
+      # MeterValues / StopTransaction still map correctly after a restart
+      # mid-transaction. The container runs as the node user (UID 1000), so
+      # ./data must be writable by it.
+      - ./data:/data
     # Alternatively, configure via a JSON config file (the same options the
-    # Home Assistant add-on uses). See config.example.json.
-    # Environment variables take precedence over config file options.
-    # volumes:
-    #   - ./config.json:/data/config.json:ro
+    # Home Assistant add-on uses). Place yours at ./data/config.json — see
+    # config.example.json. Environment variables take precedence over it.
     # environment:
     #   - CONFIG_FILE=/data/config.json
     restart: unless-stopped

@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { ChargerCallGate } from "./charger-calls";
 import type { CsmsBackend, SecondaryTarget } from "./config";
 import { createLogger } from "./logger";
+import type { StateStore } from "./state";
 import {
   OCPP_MSG_CALL,
   OCPP_MSG_CALLERROR,
@@ -140,6 +141,7 @@ export class ChargerConnection {
     private readonly secondaryTargets: SecondaryTarget[],
     private readonly protocol: string,
     private readonly authHeader: string | undefined,
+    private readonly store: StateStore,
     private readonly endCallback?: () => void,
   ) {
     this.log = createLogger(chargePointId);
@@ -170,7 +172,11 @@ export class ChargerConnection {
         keepalive: null,
         reconnectTimer: null,
         lastPongAt: Date.now(),
-        txIdMap: new Map(),
+        txIdMap: this.store.get(
+          this.chargePointId,
+          target.url,
+          target.mappedChargerId
+        ),
         pendingSecondaryTxIds: new Map(),
       };
       this.secondaries.push(state);
@@ -503,6 +509,13 @@ export class ChargerConnection {
     secondaryTxId: string
   ): void {
     state.txIdMap.set(primaryTxId, secondaryTxId);
+    this.store.set(
+      this.chargePointId,
+      state.url,
+      state.mappedChargerId,
+      primaryTxId,
+      secondaryTxId
+    );
     this.log.debug("secondary txId mapped", {
       url: state.url,
       primaryTxId,
@@ -550,7 +563,15 @@ export class ChargerConnection {
       const mapped = state.txIdMap.get(key);
       if (mapped === undefined) return msg.raw;
 
-      if (action === "StopTransaction") state.txIdMap.delete(key);
+      if (action === "StopTransaction") {
+        state.txIdMap.delete(key);
+        this.store.delete(
+          this.chargePointId,
+          state.url,
+          state.mappedChargerId,
+          key
+        );
+      }
 
       return encodeCall(msg.id, action, {
         ...payload,
@@ -696,6 +717,7 @@ export class ChargerConnection {
     if (!this.alive) return;
     this.alive = false;
 
+    this.store.flush();
     // Before the sockets close, so secondaries still hear why.
     this.chargerCalls.close();
 

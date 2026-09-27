@@ -93,7 +93,10 @@ charger_mappings:
 | **RFID tag on this backend** (`id_tag`) | No | Replaces the RFID tag in every charging session sent to this backend. Useful when the backend only accepts tags it knows. |
 
 A charger with no entries here, and nothing under *all chargers*, is
-connected to the primary only.
+connected to the primary only. If the same backend URL is listed twice for a
+charger with the same charger ID (for example under *all chargers* and again
+here without **Charger ID on this backend**), the proxy connects once and logs
+a warning.
 
 ### Add charger ID to mirror URLs
 
@@ -140,9 +143,9 @@ for it, reconnects every 10 seconds and sends them in order once it's back.
 
 For OCPP 1.6 chargers, each backend gives out its own transaction numbers. The
 proxy translates them so that meter values and stop messages reach each
-secondary with the number that secondary gave. These translations are kept
-in memory, so restarting the app in the middle of a charging session breaks
-them until the next session.
+secondary with the number that secondary gave. These translations are saved
+in the app's data folder, so a restart in the middle of a charging session
+doesn't break them. They are included in Home Assistant backups.
 
 ## Troubleshooting
 

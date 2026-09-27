@@ -97,7 +97,7 @@ docker run -d \
   ghcr.io/joulo-nl/joulo-ocpp-proxy:main
 ```
 
-Secondary mirroring is configured via `charger_mappings` in a JSON config file (see below) — there is no env-var equivalent.
+Global mirrors can be set with `SECONDARY_CSMS_URLS`. Per-charger mirroring is configured via `charger_mappings` in a JSON config file (see below) — that part has no env-var equivalent. Mounting `/data` keeps transaction ID mappings across restarts.
 
 ### Using Docker Compose
 
@@ -106,14 +106,20 @@ git clone https://github.com/joulo-nl/joulo-ocpp-proxy.git
 cd joulo-ocpp-proxy
 cp .env.example .env
 # Edit .env with your CSMS URLs
+mkdir -p data
+# The container runs as the node user (UID 1000) — make data/ writable:
+sudo chown -R 1000:1000 data
 docker compose up -d
 ```
 
-To use a JSON config file instead, copy `config.example.json` to `config.json` and
-uncomment the `volumes`/`environment` block in `docker-compose.yml`:
+`./data` is mounted at `/data`, where the proxy keeps `state.json` (see
+[State persistence](#state-persistence)).
+
+To use a JSON config file instead of `.env`, put it at `data/config.json` and
+uncomment the `environment` block in `docker-compose.yml`:
 
 ```bash
-cp config.example.json config.json
+cp config.example.json data/config.json
 ```
 
 ### From source
@@ -198,6 +204,7 @@ effect there.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `CONFIG_FILE` | No | `/data/options.json` | Path to the JSON config file |
+| `STATE_FILE` | No | `/data/state.json` | Path to the persisted transaction ID mappings |
 | `PORT` | No | `9000` | Port the proxy listens on |
 | `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs mirrored for every charger |
@@ -207,6 +214,27 @@ effect there.
 | `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No | `120` | Max char length for debug payload summaries. `0` or empty disables truncation |
 
 \* Required if not set in the config file. Environment variables take precedence over the config file. Secondary mirroring requires the JSON config file — there is no env-var equivalent for `charger_mappings`.
+
+### State persistence
+
+Because OCPP 1.6 transaction IDs are assigned per CSMS, the proxy keeps a map of
+primary → secondary transaction IDs for each charger. That map is written to
+`/data/state.json` (override with `STATE_FILE`) so a proxy restart or a charger
+reconnect in the middle of a transaction doesn't leave later `MeterValues` and
+`StopTransaction` carrying a transaction ID the secondary never issued.
+
+- Writes are debounced (500 ms), atomic (write to `.tmp`, then rename) and
+  fsynced, so a power cut can't leave an empty file.
+- Entries older than 7 days are dropped at startup.
+- Mappings are kept per charger, secondary URL and the charger ID used on that
+  secondary, so two mappings to one URL under different `mapped_charger_id`s
+  don't overwrite each other. A secondary listed twice with the same URL and
+  charger ID is connected once, with a warning in the log.
+- Persistence is best-effort: if `/data` isn't writable the proxy logs one
+  warning and keeps running with in-memory mappings only.
+
+Mount a writable volume at `/data` to keep the file across restarts — the Home
+Assistant add-on does this for you.
 
 ## Charger setup
 

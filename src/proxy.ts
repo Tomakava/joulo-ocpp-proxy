@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Config, SecondaryTarget } from "./config";
 import { ChargerConnection } from "./connection";
 import { createLogger } from "./logger";
+import { StateStore } from "./state";
 import { OCPP_SUBPROTOCOLS } from "./types";
 
 const log = createLogger("proxy");
@@ -17,6 +18,9 @@ const log = createLogger("proxy");
  */
 export function startProxy(config: Config) {
   const sessions = new Map<string, ChargerConnection>();
+
+  const store = new StateStore();
+  store.load();
 
   const server = createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -68,13 +72,13 @@ export function startProxy(config: Config) {
 
     // Global mirrors see every charger under its own ID; charger_mappings add
     // per-charger mirrors that may use a different identity and credentials.
-    const secondaries: SecondaryTarget[] = [
+    const secondaries = uniqueSecondaries(chargePointId, [
       ...config.secondaryCsms.map((backend) => ({
         ...backend,
         mappedChargerId: chargePointId,
       })),
       ...(config.secondariesByCharger.get(chargePointId) ?? []),
-    ];
+    ]);
     if (secondaries.length === 0) {
       log.info("no secondaries configured for this charger; primary only", {
         chargePointId,
@@ -88,6 +92,7 @@ export function startProxy(config: Config) {
       secondaries,
       protocol,
       authHeader,
+      store,
       () => sessions.delete(chargePointId)
     );
     sessions.set(chargePointId, conn);
@@ -108,6 +113,7 @@ export function startProxy(config: Config) {
 
   const shutdown = () => {
     log.info("shutting down…");
+    store.flush();
     wss.clients.forEach((ws) => {
       ws.close(1001, "Server shutting down");
     });
@@ -117,6 +123,36 @@ export function startProxy(config: Config) {
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+/**
+ * Drop secondaries that repeat an earlier one's URL and charger ID. Both would
+ * open a connection to the same backend as the same charger, so each would
+ * start its own transaction there for every charging session — and they would
+ * share one set of saved transactionId mappings. The first wins, so a global
+ * mirror takes precedence over a charger_mappings entry that duplicates it.
+ */
+export function uniqueSecondaries(
+  chargePointId: string,
+  targets: SecondaryTarget[]
+): SecondaryTarget[] {
+  const seen = new Set<string>();
+
+  return targets.filter((target) => {
+    const key = `${target.url}
+${target.mappedChargerId}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      return true;
+    }
+
+    log.warn("duplicate secondary ignored: same URL and charger ID as another", {
+      chargePointId,
+      url: target.url,
+      mappedChargerId: target.mappedChargerId,
+    });
+    return false;
+  });
 }
 
 function extractChargePointId(url: string | undefined): string | null {
