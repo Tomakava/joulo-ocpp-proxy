@@ -1,6 +1,9 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 import { startProxy } from "../../src/proxy";
 import { rawDataToString } from "../../src/utils/websocket";
@@ -182,10 +185,15 @@ describe("proxy feature", () => {
       });
     });
 
+  let stateDirectory: string;
+
   beforeEach(() => {
     primary = createWsServer();
     secondary = createWsServer();
     openChargers = [];
+    // Keep the proxy's persisted state out of the real /data mount.
+    stateDirectory = mkdtempSync(join(tmpdir(), "ocpp-proxy-state-"));
+    vi.stubEnv("STATE_FILE", join(stateDirectory, "state.json"));
   });
 
   afterEach(async () => {
@@ -196,6 +204,9 @@ describe("proxy feature", () => {
       }
 
       await closeAll([primary, secondary]);
+
+      vi.unstubAllEnvs();
+      rmSync(stateDirectory, { recursive: true, force: true });
   });
 
   it("forwards charger frames to primary and secondary, and forwards primary response back", async () => {
