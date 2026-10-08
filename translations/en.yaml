@@ -5,12 +5,35 @@ configuration:
       Backend your chargers normally connect to, e.g.
       wss://your-csms.example.com/ocpp. The charger ID is appended
       automatically unless disabled below. Its replies are the only ones sent
-      back to the charger.
+      back to the charger. Can be left empty when every charger connects
+      through a primary route.
   primary_csms_append_charge_point_id:
     name: Add charger ID to primary URL
     description: >-
       Adds /<charger ID> to the primary CSMS URL. Turn off if the backend gave
       you a complete URL that already identifies the charger.
+  primary_csms_routes:
+    name: Primary routes
+    description: >-
+      Send chargers to a different primary depending on the path in their URL.
+      A charger at ws://proxy-host:9000/site-a/CHARGER-001 uses the route with
+      path site-a. Chargers on any other path use the Primary CSMS URL.
+    fields:
+      path:
+        name: Path
+        description: >-
+          Part of the charger URL between the port and the charger ID, e.g.
+          site-a or ocpp/site-a.
+      url:
+        name: Primary CSMS URL
+        description: >-
+          Backend chargers on this path connect to, e.g.
+          wss://site-a-csms.example.com/ocpp.
+      append_charge_point_id:
+        name: Add charger ID to this URL
+        description: >-
+          Adds /<charger ID> to this route's URL. Leave empty to follow
+          "Add charger ID to primary URL".
   secondary_csms:
     name: Mirror to backends (all chargers)
     description: >-

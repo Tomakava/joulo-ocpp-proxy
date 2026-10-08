@@ -15,7 +15,7 @@ down, the charger and the primary are not affected.
 ## Setup
 
 1. Fill in the **Configuration** tab (see below). Only **Primary CSMS URL** is
-   required.
+   required (or **Primary routes**, if chargers pick their primary by path).
 2. Click **Start**. On the **Info** tab, enable **Start on boot** and
    **Watchdog**.
 3. Open the **Log** tab and check for `proxy listening`.
@@ -56,6 +56,33 @@ On by default. Turn it off when the backend gave you one complete URL per
 charger, e.g. `wss://fixed-csms.example.com/XXXXXXXX`, and enter that full URL
 as **Primary CSMS URL**. With it off, every charger connected to the proxy
 reaches that same URL, so use it with a single charger.
+
+### Primary routes
+
+Use when chargers on one proxy belong to different primaries. Each route
+pairs a path with a primary URL; a charger picks its route by putting that
+path in front of its ID:
+
+```yaml
+primary_csms_routes:
+  - path: site-a
+    url: "wss://site-a-csms.example.com/ocpp"
+  - path: site-b
+    url: "wss://fixed-csms.example.com/XXXXXXXX"
+    append_charge_point_id: false
+```
+
+| Charger URL | Primary |
+|---|---|
+| `ws://<home-assistant-ip>:9000/site-a/CHARGER-001` | `wss://site-a-csms.example.com/ocpp/CHARGER-001` |
+| `ws://<home-assistant-ip>:9000/site-b/CHARGER-002` | `wss://fixed-csms.example.com/XXXXXXXX` |
+| `ws://<home-assistant-ip>:9000/CHARGER-003` | **Primary CSMS URL** |
+
+A charger whose path matches no route uses **Primary CSMS URL**. Leave that
+empty to refuse such chargers instead. **Add charger ID to this URL** works
+like *Add charger ID to primary URL* for one route; left empty, it follows
+that option. Per-charger mirrors still match on the charger ID alone, not the
+path.
 
 ### Mirror to backends (all chargers)
 
@@ -153,7 +180,12 @@ doesn't break them. They are included in Home Assistant backups.
 ## Troubleshooting
 
 **The app stops right after starting.** Check the log. The most common cause
-is an empty **Primary CSMS URL**.
+is an empty **Primary CSMS URL** with no **Primary routes**.
+
+**The charger is disconnected right after connecting**, with
+`rejected connection: no primary CSMS for this path` in the log. The path in
+the charger URL matches no **Primary routes** entry and **Primary CSMS URL**
+is empty. Fix the path in the charger, or add a route for it.
 
 **The charger doesn't connect.**
 - The charger URL must start with `ws://`, not `wss://`, and use port `9000`.

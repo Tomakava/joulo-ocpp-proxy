@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import type { Config, SecondaryTarget } from "./config";
+import type { Config, CsmsBackend, SecondaryTarget } from "./config";
 import { ChargerConnection } from "./connection";
 import { createLogger } from "./logger";
 import { StateStore } from "./state";
@@ -12,9 +12,11 @@ const log = createLogger("proxy");
  * Start the OCPP proxy server.
  *
  * Chargers connect via:
- *   ws(s)://proxy-host:port/<chargePointId>
+ *   ws(s)://proxy-host:port/[<route path>/]<chargePointId>
  *
- * The proxy can append the chargePointId to each upstream CSMS URL.
+ * The route path selects the primary CSMS from primary_csms_routes; without a
+ * match the default primary is used. The proxy can append the chargePointId
+ * to each upstream CSMS URL.
  */
 export function startProxy(config: Config) {
   const sessions = new Map<string, ChargerConnection>();
@@ -42,12 +44,22 @@ export function startProxy(config: Config) {
   });
 
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-    const chargePointId = extractChargePointId(req.url);
+    const { routePath, chargePointId } = parseChargerPath(req.url);
     if (!chargePointId) {
       log.warn("rejected connection: no charge point ID in path", {
         url: req.url,
       });
       ws.close(1002, "Charge point ID required in URL path");
+      return;
+    }
+
+    const primaryCsms = selectPrimary(config, routePath);
+    if (!primaryCsms) {
+      log.warn("rejected connection: no primary CSMS for this path", {
+        chargePointId,
+        path: routePath,
+      });
+      ws.close(1008, "Unknown URL path");
       return;
     }
 
@@ -58,6 +70,8 @@ export function startProxy(config: Config) {
       chargePointId,
       protocol: protocol || "none",
       ip: req.socket.remoteAddress,
+      path: routePath,
+      primary: primaryCsms.url,
     });
 
     // Destroy any existing session for this charger before creating a new one.
@@ -88,7 +102,7 @@ export function startProxy(config: Config) {
     const conn = new ChargerConnection(
       ws,
       chargePointId,
-      config.primaryCsms,
+      primaryCsms,
       secondaries,
       protocol,
       authHeader,
@@ -105,7 +119,13 @@ export function startProxy(config: Config) {
   server.listen(config.port, () => {
     log.info("proxy listening", {
       port: config.port,
-      primary: config.primaryCsms.url,
+      primary: config.primaryCsms?.url,
+      primaryRoutes: Object.fromEntries(
+        [...(config.primaryCsmsByPath ?? [])].map(([path, backend]) => [
+          path,
+          backend.url,
+        ])
+      ),
       secondaries: config.secondaryCsms.map((backend) => backend.url),
       mappedChargers: [...config.secondariesByCharger.keys()],
     });
@@ -155,13 +175,31 @@ ${target.mappedChargerId}`;
   });
 }
 
-function extractChargePointId(url: string | undefined): string | null {
-  if (!url) return null;
-  const segments = url
-    .split("?")[0]
-    .split("/")
-    .filter(Boolean);
-  // Accept /ocpp/<id>, /ws/<id>, or just /<id>
-  if (segments.length === 0) return null;
-  return segments[segments.length - 1];
+/**
+ * Split a charger's connect URL into the charge point ID (the last path
+ * segment) and the route path in front of it: `/site-a/CP-1?x=y` gives route
+ * path `site-a` and ID `CP-1`. Both are as received, not percent-decoded.
+ */
+export function parseChargerPath(url: string | undefined): {
+  routePath: string;
+  chargePointId: string | null;
+} {
+  const segments = (url ?? "").split("?")[0].split("/").filter(Boolean);
+  const chargePointId = segments.pop() ?? null;
+  return { routePath: segments.join("/"), chargePointId };
+}
+
+/**
+ * The primary for a charger connecting under routePath: the matching
+ * primary_csms_routes entry, else the default primary. Undefined when neither
+ * exists, so the connection is refused.
+ *
+ * Falling back to the default keeps prefixes like `/ocpp/<id>` and `/ws/<id>`
+ * working for setups that configure no routes for them.
+ */
+export function selectPrimary(
+  config: Pick<Config, "primaryCsms" | "primaryCsmsByPath">,
+  routePath: string
+): CsmsBackend | undefined {
+  return config.primaryCsmsByPath?.get(routePath) ?? config.primaryCsms;
 }

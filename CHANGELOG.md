@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.24
+
+- New option **Primary routes**: chargers can be sent to different primaries
+  depending on the path in their URL, e.g. `ws://<ip>:9000/site-a/CHARGER-001`
+  uses the primary configured for `site-a`. Each route can turn **Add charger
+  ID to primary URL** on or off for itself.
+- **Primary CSMS URL** may be left empty when routes are set; chargers on a
+  path with no route are then refused. When it is set, they go to it as before.
+- A malformed or duplicate route is logged and skipped instead of stopping the
+  app.
+
 ## 1.0.23
 
 - Every option in the Configuration tab now has a readable name and a
