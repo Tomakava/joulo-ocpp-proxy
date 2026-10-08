@@ -1,6 +1,14 @@
 {
   "primary_csms_url": "wss://your-primary-csms.example.com/ocpp",
   "primary_csms_append_charge_point_id": true,
+  "primary_csms_routes": [
+    { "path": "site-a", "url": "wss://site-a-csms.example.com/ocpp" },
+    {
+      "path": "site-b",
+      "url": "wss://fixed-csms.example.com/XXXXXXXX",
+      "append_charge_point_id": false
+    }
+  ],
   "secondary_csms": [{ "url": "wss://mirror-every-charger.example.com/ocpp" }],
   "secondary_csms_append_charge_point_id": true,
   "charger_mappings": [

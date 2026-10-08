@@ -186,6 +186,45 @@ An option of the wrong type is reported in the log and ignored, so a typo in the
 config file falls back to the default instead of stopping the proxy. A missing
 `primary_csms_url` is fatal — the proxy logs one line saying so and exits.
 
+#### Primary routes
+
+`primary_csms_routes` lets one proxy serve chargers that belong to different
+primaries. Each entry maps a path to a primary; the charger selects it with
+the part of its URL in front of the charge point ID:
+
+```json
+{
+  "primary_csms_url": "wss://default-csms.example.com/ocpp",
+  "primary_csms_routes": [
+    { "path": "site-a", "url": "wss://site-a-csms.example.com/ocpp" },
+    {
+      "path": "site-b",
+      "url": "wss://fixed-csms.example.com/XXXXXXXX",
+      "append_charge_point_id": false
+    }
+  ]
+}
+```
+
+| Charger connects to | Primary |
+|---|---|
+| `ws://proxy:9000/site-a/CHARGER-001` | `wss://site-a-csms.example.com/ocpp/CHARGER-001` |
+| `ws://proxy:9000/site-b/CHARGER-002` | `wss://fixed-csms.example.com/XXXXXXXX` |
+| `ws://proxy:9000/ocpp/CHARGER-003` | `wss://default-csms.example.com/ocpp/CHARGER-003` |
+
+- `path` is matched exactly, ignoring leading and trailing slashes, and may
+  have several segments (`ocpp/site-a`).
+- `append_charge_point_id` is optional and defaults to
+  `primary_csms_append_charge_point_id`.
+- A path with no route uses `primary_csms_url`. When `primary_csms_url` is
+  not set, such chargers are refused with close code `1008` — and
+  `primary_csms_url` is then no longer required.
+- Secondaries and `charger_mappings` ignore the path: they match on the charge
+  point ID only. Sessions are keyed by charge point ID too, so two chargers
+  with the same ID on different paths replace each other.
+
+There is no env-var equivalent.
+
 There are two ways to configure secondaries, and they can be combined:
 
 - `secondary_csms` / `SECONDARY_CSMS_URLS` — global mirrors that receive traffic
@@ -223,14 +262,14 @@ effect there.
 | `CONFIG_FILE` | No | `/data/options.json` | Path to the JSON config file |
 | `STATE_FILE` | No | `/data/state.json` | Path to the persisted transaction ID mappings |
 | `PORT` | No | `9000` | Port the proxy listens on |
-| `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS |
+| `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS (the default when `primary_csms_routes` is set) |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs mirrored for every charger |
 | `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append incoming charge point ID to `PRIMARY_CSMS_URL`. Config file: `primary_csms_append_charge_point_id` |
 | `SECONDARY_CSMS_APPEND_CHARGE_POINT_ID` | No | `true` | `true`/`false`; when `true`, append the charge point ID to secondary URLs (the `mapped_charger_id` for mapped secondaries). Config file: `secondary_csms_append_charge_point_id` |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error` |
 | `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No | `120` | Max char length for debug payload summaries. `0` or empty disables truncation |
 
-\* Required if not set in the config file. Environment variables take precedence over the config file. Secondary mirroring requires the JSON config file — there is no env-var equivalent for `charger_mappings`.
+\* Required if not set in the config file, unless `primary_csms_routes` is configured. Environment variables take precedence over the config file. Secondary mirroring requires the JSON config file — there is no env-var equivalent for `charger_mappings`.
 
 ### State persistence
 
@@ -278,7 +317,7 @@ With `PRIMARY_CSMS_APPEND_CHARGE_POINT_ID=false` and `SECONDARY_CSMS_APPEND_CHAR
 
 ### URL patterns
 
-The proxy accepts any of these URL patterns and extracts the last path segment as the charge point ID:
+The proxy accepts any of these URL patterns and extracts the last path segment as the charge point ID. Whatever comes before it selects a [primary route](#primary-routes) if one matches:
 
 ```
 ws://proxy:9000/CHARGER-001

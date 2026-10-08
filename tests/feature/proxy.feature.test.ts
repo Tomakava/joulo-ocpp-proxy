@@ -346,6 +346,81 @@ describe("proxy feature", () => {
     expect(secondaryFrames).toEqual([garbageFrame, callFrame]);
   });
 
+  it("selects the primary by the path in front of the charge point ID", async () => {
+    // `secondary` stands in for a second primary here.
+    const defaultConnPromise = waitForConnection(primary);
+    const routedConnPromise = waitForConnection(secondary);
+
+    const defaultPort = await startWsServer(primary);
+    const routedPort = await startWsServer(secondary);
+    const proxyPort = await allocatePort();
+
+    startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(defaultPort)}/default`,
+        appendChargePointId: true,
+      },
+      primaryCsmsByPath: new Map([
+        [
+          "site-a",
+          {
+            url: `ws://127.0.0.1:${String(routedPort)}/routed`,
+            appendChargePointId: true,
+          },
+        ],
+      ]),
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: { logLevel: "error" },
+    });
+
+    const routedCharger = await connectWhenOpen(
+      `ws://127.0.0.1:${String(proxyPort)}/site-a/cp-a`,
+      "ocpp1.6"
+    );
+    openChargers.push(routedCharger);
+    expect((await routedConnPromise).url).toBe("/routed/cp-a");
+
+    const defaultCharger = await connectWhenOpen(
+      `ws://127.0.0.1:${String(proxyPort)}/ocpp/cp-b`,
+      "ocpp1.6"
+    );
+    openChargers.push(defaultCharger);
+    expect((await defaultConnPromise).url).toBe("/default/cp-b");
+  });
+
+  it("refuses a charger on an unknown path when there is no default primary", async () => {
+    const primaryPort = await startWsServer(primary);
+    const proxyPort = await allocatePort();
+
+    startProxy({
+      port: proxyPort,
+      primaryCsmsByPath: new Map([
+        [
+          "site-a",
+          {
+            url: `ws://127.0.0.1:${String(primaryPort)}`,
+            appendChargePointId: true,
+          },
+        ],
+      ]),
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: { logLevel: "error" },
+    });
+
+    const charger = await connectWhenOpen(
+      `ws://127.0.0.1:${String(proxyPort)}/site-b/cp-1`,
+      "ocpp1.6"
+    );
+    openChargers.push(charger);
+
+    const { code } = await waitForClose(charger);
+    expect(code).toBe(1008);
+    expect(primary.connections).toEqual([]);
+  });
+
   it("accepts charger URLs with query parameters", async () => {
     const primaryConnPromise = waitForConnection(primary);
 

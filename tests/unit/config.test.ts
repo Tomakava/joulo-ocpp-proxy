@@ -216,7 +216,7 @@ describe("loadConfig", () => {
 
       const config = loadConfig();
 
-      expect(config.primaryCsms.url).toBe("wss://primary.example/ws");
+      expect(config.primaryCsms?.url).toBe("wss://primary.example/ws");
       expect(config.secondaryCsms).toEqual([
         { url: "wss://s1.example/ws", appendChargePointId: true },
         { url: "wss://s2.example/ws", appendChargePointId: true },
@@ -236,7 +236,7 @@ describe("loadConfig", () => {
 
       const config = loadConfig();
 
-      expect(config.primaryCsms.url).toBe("wss://env.example/ws");
+      expect(config.primaryCsms?.url).toBe("wss://env.example/ws");
       expect(config.secondaryCsms).toEqual([
         { url: "wss://env-secondary.example/ws", appendChargePointId: true },
       ]);
@@ -272,7 +272,7 @@ describe("loadConfig", () => {
 
       const config = loadConfig();
 
-      expect(config.primaryCsms.appendChargePointId).toBe(false);
+      expect(config.primaryCsms?.appendChargePointId).toBe(false);
       expect(config.secondaryCsms[0].appendChargePointId).toBe(false);
       expect(
         config.secondariesByCharger.get("CP-1")?.[0].appendChargePointId
@@ -286,7 +286,7 @@ describe("loadConfig", () => {
       });
       vi.stubEnv("PRIMARY_CSMS_APPEND_CHARGE_POINT_ID", "true");
 
-      expect(loadConfig().primaryCsms.appendChargePointId).toBe(true);
+      expect(loadConfig().primaryCsms?.appendChargePointId).toBe(true);
     });
 
     it("ignores a non-boolean append charge point id option", () => {
@@ -295,7 +295,7 @@ describe("loadConfig", () => {
         primary_csms_append_charge_point_id: "no",
       });
 
-      expect(loadConfig().primaryCsms.appendChargePointId).toBe(true);
+      expect(loadConfig().primaryCsms?.appendChargePointId).toBe(true);
     });
 
     it("still honours the pre-1.0.20 log_max_message_length option", () => {
@@ -359,6 +359,56 @@ describe("loadConfig", () => {
       ]);
     });
 
+    it("reads primary_csms_routes keyed by normalized path", () => {
+      writeConfigFile({
+        primary_csms_url: "wss://primary.example/ws",
+        primary_csms_append_charge_point_id: false,
+        primary_csms_routes: [
+          { path: "/site-a/", url: "wss://a.example/ocpp" },
+          {
+            path: "ocpp//site-b",
+            url: " wss://b.example/ocpp ",
+            append_charge_point_id: true,
+          },
+          // Duplicates and incomplete entries are skipped.
+          { path: "site-a", url: "wss://dup.example/ocpp" },
+          { path: "/", url: "wss://no-path.example/ocpp" },
+          { path: "site-c" },
+          null,
+        ],
+      });
+
+      const { primaryCsmsByPath } = loadConfig();
+
+      expect(primaryCsmsByPath).toEqual(
+        new Map([
+          ["site-a", { url: "wss://a.example/ocpp", appendChargePointId: false }],
+          [
+            "ocpp/site-b",
+            { url: "wss://b.example/ocpp", appendChargePointId: true },
+          ],
+        ])
+      );
+    });
+
+    it("needs no default primary when primary_csms_routes is set", () => {
+      writeConfigFile({
+        primary_csms_url: "",
+        primary_csms_routes: [{ path: "site-a", url: "wss://a.example/ocpp" }],
+      });
+
+      const config = loadConfig();
+
+      expect(config.primaryCsms).toBeUndefined();
+      expect(config.primaryCsmsByPath?.size).toBe(1);
+    });
+
+    it("still requires a primary when every route is invalid", () => {
+      writeConfigFile({ primary_csms_routes: [{ path: "site-a" }] });
+
+      expect(() => loadConfig()).toThrow("PRIMARY_CSMS_URL is required.");
+    });
+
     it("never logs a mapping password when skipping an invalid entry", () => {
       writeConfigFile({
         primary_csms_url: "wss://primary.example/ws",
@@ -419,7 +469,7 @@ describe("loadConfig", () => {
 
       const config = loadConfig();
 
-      expect(config.primaryCsms.url).toBe("wss://env.example/ws");
+      expect(config.primaryCsms?.url).toBe("wss://env.example/ws");
       expect(config.secondaryCsms).toEqual([]);
     });
 
@@ -447,7 +497,7 @@ describe("loadConfig", () => {
 
       const config = loadConfig();
 
-      expect(config.primaryCsms.url).toBe("wss://primary.example/ws");
+      expect(config.primaryCsms?.url).toBe("wss://primary.example/ws");
       expect(config.secondaryCsms).toEqual([]);
     });
   });

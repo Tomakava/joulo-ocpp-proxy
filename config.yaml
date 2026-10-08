@@ -14,6 +14,7 @@ ports_description:
 options:
   primary_csms_url: ""
   primary_csms_append_charge_point_id: true
+  primary_csms_routes: []
   secondary_csms: []
   secondary_csms_append_charge_point_id: true
   charger_mappings: []
@@ -22,6 +23,10 @@ options:
 schema:
   primary_csms_url: str
   primary_csms_append_charge_point_id: bool?
+  primary_csms_routes:
+    - path: str
+      url: str
+      append_charge_point_id: bool?
   secondary_csms:
     - url: str
   secondary_csms_append_charge_point_id: bool?

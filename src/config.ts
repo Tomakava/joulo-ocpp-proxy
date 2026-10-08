@@ -19,7 +19,16 @@ const log = createLogger("config");
 
 export interface Config {
   port: number;
-  primaryCsms: CsmsBackend;
+  /**
+   * Primary for chargers whose URL path matches no route. Optional when
+   * primaryCsmsByPath is set: chargers on an unknown path are then refused.
+   */
+  primaryCsms?: CsmsBackend;
+  /**
+   * Primaries selected by the path in front of the charge point ID, keyed by
+   * that path without leading or trailing slashes (`site-a`, `ocpp/site-b`).
+   */
+  primaryCsmsByPath?: Map<string, CsmsBackend>;
   /** Mirrors that receive traffic from every charger. */
   secondaryCsms: CsmsBackend[];
   /** Mirrors wired to one specific charger, keyed by its charge point ID. */
@@ -46,6 +55,12 @@ interface FileSecondary {
   url: string;
 }
 
+interface FilePrimaryRoute {
+  path: string;
+  url: string;
+  append_charge_point_id?: boolean;
+}
+
 interface FileChargerMapping {
   secondary_url: string;
   charger_id: string;
@@ -57,6 +72,7 @@ interface FileChargerMapping {
 interface FileOptions {
   primary_csms_url?: string;
   primary_csms_append_charge_point_id?: boolean;
+  primary_csms_routes?: FilePrimaryRoute[];
   secondary_csms_append_charge_point_id?: boolean;
   secondary_csms?: FileSecondary[];
   charger_mappings?: FileChargerMapping[];
@@ -109,6 +125,7 @@ function parseFileOptions(parsed: unknown): FileOptions {
       raw.primary_csms_append_charge_point_id,
       "primary_csms_append_charge_point_id"
     ),
+    primary_csms_routes: readPrimaryRoutes(raw.primary_csms_routes),
     secondary_csms_append_charge_point_id: readBoolean(
       raw.secondary_csms_append_charge_point_id,
       "secondary_csms_append_charge_point_id"
@@ -194,6 +211,63 @@ function readSecondaries(value: unknown): FileSecondary[] | undefined {
   });
 
   return secondaries;
+}
+
+function readPrimaryRoutes(value: unknown): FilePrimaryRoute[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    log.warn("config file option ignored: expected a list", {
+      option: "primary_csms_routes",
+    });
+    return undefined;
+  }
+
+  const routes: FilePrimaryRoute[] = [];
+  value.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null) {
+      log.warn("primary_csms_routes entry ignored: expected an object", {
+        index,
+      });
+      return;
+    }
+
+    const raw = entry as Record<string, unknown>;
+    const path =
+      typeof raw.path === "string" ? normalizeRoutePath(raw.path) : "";
+    const url = readEntryString(raw.url);
+
+    if (path === "" || url === undefined) {
+      log.warn(
+        "primary_csms_routes entry ignored: path and url are required",
+        { index }
+      );
+      return;
+    }
+
+    const append = raw.append_charge_point_id;
+    if (append !== undefined && typeof append !== "boolean") {
+      log.warn(
+        "primary_csms_routes append_charge_point_id ignored: expected true or false",
+        { index }
+      );
+    }
+
+    routes.push({
+      path,
+      url,
+      append_charge_point_id: typeof append === "boolean" ? append : undefined,
+    });
+  });
+
+  return routes;
+}
+
+/**
+ * A route path as the proxy compares it: no empty segments and no leading or
+ * trailing slashes, so `/site-a/`, `site-a` and `//site-a` are one route.
+ */
+export function normalizeRoutePath(path: string): string {
+  return path.split("/").filter(Boolean).join("/");
 }
 
 function readChargerMappings(
@@ -315,6 +389,33 @@ function buildSecondariesByCharger(
   return result;
 }
 
+/**
+ * Key primary_csms_routes by path. A route without its own
+ * append_charge_point_id follows primary_csms_append_charge_point_id.
+ */
+function buildPrimaryCsmsByPath(
+  routes: FilePrimaryRoute[],
+  appendChargePointId: boolean
+): Map<string, CsmsBackend> {
+  const result = new Map<string, CsmsBackend>();
+
+  for (const route of routes) {
+    if (result.has(route.path)) {
+      log.warn("duplicate primary_csms_routes path ignored", {
+        path: route.path,
+      });
+      continue;
+    }
+
+    result.set(route.path, {
+      url: route.url,
+      appendChargePointId: route.append_charge_point_id ?? appendChargePointId,
+    });
+  }
+
+  return result;
+}
+
 /** Like parseOptionalPositiveInteger, but 0 also means "no limit". */
 function parseDebugMessageMaxLength(
   value: string | undefined
@@ -326,13 +427,13 @@ function parseDebugMessageMaxLength(
 export function loadConfig(): Config {
   const file = loadFileOptions();
 
+  // An empty string is how the Home Assistant form leaves the URL unset, which
+  // is valid when primary_csms_routes is configured.
+  const rawPrimaryUrl = (
+    process.env.PRIMARY_CSMS_URL ?? file.primary_csms_url
+  )?.trim();
   const primaryUrl: string | undefined =
-    process.env.PRIMARY_CSMS_URL ?? file.primary_csms_url;
-  if (!primaryUrl) {
-    throw new Error(
-      "PRIMARY_CSMS_URL is required. Set it via the PRIMARY_CSMS_URL environment variable, the primary_csms_url config file option, or the addon configuration in Home Assistant."
-    );
-  }
+    rawPrimaryUrl === "" ? undefined : rawPrimaryUrl;
 
   const envSecondaryUrls: string[] = (process.env.SECONDARY_CSMS_URLS ?? "")
     .split(",")
@@ -350,6 +451,17 @@ export function loadConfig(): Config {
     file.primary_csms_append_charge_point_id,
     (value) => parseBoolean(value, true)
   );
+
+  const primaryCsmsByPath = buildPrimaryCsmsByPath(
+    file.primary_csms_routes ?? [],
+    primaryAppendChargePointId
+  );
+
+  if (!primaryUrl && primaryCsmsByPath.size === 0) {
+    throw new Error(
+      "PRIMARY_CSMS_URL is required. Set it via the PRIMARY_CSMS_URL environment variable, the primary_csms_url config file option, or the addon configuration in Home Assistant. Alternatively, configure primary_csms_routes."
+    );
+  }
 
   const secondaryAppendChargePointId: boolean = parseSetting(
     "SECONDARY_CSMS_APPEND_CHARGE_POINT_ID",
@@ -387,10 +499,10 @@ export function loadConfig(): Config {
 
   return {
     port,
-    primaryCsms: {
-      url: primaryUrl,
-      appendChargePointId: primaryAppendChargePointId,
-    },
+    primaryCsms: primaryUrl
+      ? { url: primaryUrl, appendChargePointId: primaryAppendChargePointId }
+      : undefined,
+    primaryCsmsByPath,
     secondaryCsms,
     secondariesByCharger,
     loggerConfig: {
