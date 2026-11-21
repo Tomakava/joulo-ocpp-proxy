@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Persist mirrored reports and transaction bindings in a synchronous SQLite
+  journal; retain queued data across charger reconnects and process crashes
+  instead of evicting it after 100 frames.
+- Keep ambiguous transaction starts for explicit reconciliation, and retain
+  rejected/unconfirmed reports rather than treating errors as delivery.
+- Assign persistent relay RPC IDs so reused charger IDs and late replies do
+  not acknowledge the wrong report.
+- Add read-only `/health` reporting status and an offline inspection,
+  export, binding and reconciliation CLI.
+- Import existing JSON mappings once; keep active bindings beyond seven days.
+  Database or migration failures stop startup instead of hiding data loss.
+- Use cold Home Assistant backups for consistent journal copies. Runtime
+  storage faults degrade reporting health without stopping primary forwarding.
+
 ## 1.0.24
 
 - New option **Primary routes**: chargers can be sent to different primaries

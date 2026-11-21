@@ -3,10 +3,14 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Config, CsmsBackend, SecondaryTarget } from "./config";
 import { ChargerConnection } from "./connection";
 import { createLogger } from "./logger";
-import { StateStore } from "./state";
+import { OutboxStore } from "./outbox";
 import { OCPP_SUBPROTOCOLS } from "./types";
 
 const log = createLogger("proxy");
+
+export interface ProxyServer {
+  close: () => Promise<void>;
+}
 
 /**
  * Start the OCPP proxy server.
@@ -18,13 +22,18 @@ const log = createLogger("proxy");
  * match the default primary is used. The proxy can append the chargePointId
  * to each upstream CSMS URL.
  */
-export function startProxy(config: Config) {
+export function startProxy(config: Config): ProxyServer {
   const sessions = new Map<string, ChargerConnection>();
 
-  const store = new StateStore();
-  store.load();
+  const store = new OutboxStore();
 
-  const server = createServer((_req, res) => {
+  const server = createServer((req, res) => {
+    if (req.url === "/health" && req.method === "GET") {
+      const health = store.health();
+      res.writeHead(health.status === "ok" ? 200 : 503, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(health) + "\n");
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end(
       "joulo-ocpp-proxy is running.\n" +
@@ -131,18 +140,38 @@ export function startProxy(config: Config) {
     });
   });
 
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    if (closing) return closing;
+    for (const connection of sessions.values()) connection.teardown();
+    wss.clients.forEach((ws) => { ws.close(1001, "Server shutting down"); });
+    const { promise, resolve, reject } = Promise.withResolvers<undefined>();
+    closing = promise;
+    server.close((error) => {
+      process.off("SIGINT", shutdown);
+      process.off("SIGTERM", shutdown);
+      store.close();
+      if (error) reject(error);
+      else resolve(undefined);
+    });
+    return closing;
+  };
   const shutdown = () => {
     log.info("shutting down…");
-    store.flush();
-    wss.clients.forEach((ws) => {
-      ws.close(1001, "Server shutting down");
+    const deadline = setTimeout(() => process.exit(1), 5000);
+    deadline.unref();
+    void close().then(() => {
+      clearTimeout(deadline);
+      process.exit(0);
+    }, (error: unknown) => {
+      log.error("shutdown failed", { error: String(error) });
+      process.exit(1);
     });
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(1), 5000);
   };
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  return { close };
 }
 
 /**
