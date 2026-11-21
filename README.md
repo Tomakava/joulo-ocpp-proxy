@@ -56,26 +56,41 @@ isn't connected, that secondary gets a `GenericError` CallError instead.
 
 ### Secondary reliability
 
-Because charger sessions can stay open for days or weeks, secondaries get a few extras so a brief network blip doesn't silently break your mirror for the rest of the session:
+Mirrored reports are committed to a SQLite outbox **before** they are sent to a
+secondary. There is no 100-frame eviction limit and no in-memory fallback.
+Pending reports survive charger disconnects, proxy restarts and process crashes.
+They resume when that charger reconnects with the same primary, protocol and
+secondary identity; incoming HTTP authorization headers are not stored.
 
-- **Auto-reconnect** — if a secondary disconnects, the proxy reconnects after 10s and keeps retrying until the charger session ends.
-- **Keepalive ping** — the proxy sends a WebSocket ping to each secondary every 30s so idle connections aren't dropped by load balancers or CSMS timeouts.
-- **Acknowledged delivery** — every mirrored frame goes through a per-secondary outbox and stays there until that secondary answers it. Unanswered frames are resent, and the outbox replays in order on reconnect.
+- **One outstanding CALL per secondary.** Transaction-dependent reports wait for
+  the secondary's confirmed transaction ID. A missing binding blocks delivery
+  instead of sending a transaction ID issued by another backend.
+- **Stable relay IDs.** Each journal entry gets its own RPC ID, retained across
+  retries. Reused charger RPC IDs and late replies cannot acknowledge another
+  queued report. Primary traffic keeps the charger's original IDs.
+- **No blind start retries.** An OCPP 1.6 `StartTransaction`, or a 2.x
+  `TransactionEvent` with `eventType: Started`, whose outcome is unknown is
+  retained as `uncertain`. Disconnects, crashes and a 120-second ack timeout do
+  not cause another start. Reconcile it with the backend before proceeding.
+- **Failures remain inspectable.** `CALLERROR` and known negative responses are
+  retained as `rejected`, not successful delivery. Critical boot/transaction
+  failures block that secondary's queue. Other unanswered reports are retried
+  after 120 seconds, then retained as `unconfirmed` after a second timeout so
+  periodic telemetry cannot stall everything indefinitely. They are not deleted.
+- **Reconnect and keepalive.** A secondary reconnects every 10 seconds while the
+  charger is connected; WebSocket pings run every 30 seconds.
 
-A secondary failure never affects the charger or the primary link.
+Secondary network failures do not tear down primary charging control. Durable
+commits do add local disk I/O to message handling. A runtime storage failure
+keeps primary forwarding active but degrades reporting health; new mirror copies
+that cannot be committed can still be lost. Monitor free space and reporting
+health, not just whether the process is listening.
 
-#### Acknowledged delivery
-
-A socket can go half-open: `send()` reports success and the connection still looks open, but nothing reaches the peer and TCP doesn't report the failure for a long time. A frame written in that window looks delivered and would be lost silently. The only reliable signal is the secondary's own reply, so that is what the proxy waits for.
-
-- A mirrored CALL is held until that secondary answers with a `CALLRESULT` or `CALLERROR`.
-- **At most one CALL is in flight per secondary.** MeterValues can't be rewritten until the StartTransaction ahead of it has come back with that secondary's transaction ID, so the queue is strictly ordered.
-- An unanswered CALL is resent after 120s. After two ack timeouts it's given up on, so one message a secondary never answers can't stall the mirror. A dropped connection doesn't count as a timeout — the frame simply goes out again on the new one.
-- Up to 100 frames per secondary are held. If it fills, the oldest *waiting* frame is dropped (never the in-flight one, whose ack releases everything behind it).
-
-**Your secondary must answer mirrored CALLs.** A secondary that ignores an action will see it resent once and then dropped. Every action is retried, including the non-transaction ones OCPP 1.6 tells a Charge Point not to resend — a mirror is not a Charge Point, and a dropped StatusNotification leaves that secondary's view of the connector stale until the next state change.
-
-A resent StartTransaction may open a second transaction on that secondary: OCPP 1.6 gives the Central System no identifier to tell a resend from a new transaction, so detecting it is left to the backend. That's the deliberate trade: losing it is worse, because without the reply there is no transaction ID mapping and every MeterValues for the rest of the session carries the primary's ID instead.
+**Exactly-once delivery requires backend cooperation.** A backend can accept a
+start and lose its reply; OCPP 1.6 has no portable query or idempotency key that
+lets a proxy distinguish this from non-receipt. This proxy preserves the evidence
+and requires a decision rather than guessing. Retries of other reports can still
+be duplicates; backends must process their transaction IDs/timestamps correctly.
 
 ## Quick start
 
@@ -114,7 +129,7 @@ docker run -d \
   ghcr.io/tomakava/joulo-ocpp-proxy:main
 ```
 
-Global mirrors can be set with `SECONDARY_CSMS_URLS`. Per-charger mirroring is configured via `charger_mappings` in a JSON config file (see below) — that part has no env-var equivalent. Mounting `/data` keeps transaction ID mappings across restarts.
+Global mirrors can be set with `SECONDARY_CSMS_URLS`. Per-charger mirroring is configured via `charger_mappings` in a JSON config file (see below) — that part has no env-var equivalent. Mounting `/data` preserves the delivery journal and transaction bindings across restarts.
 
 ### Using Docker Compose
 
@@ -129,7 +144,7 @@ sudo chown -R 1000:1000 data
 docker compose up -d
 ```
 
-`./data` is mounted at `/data`, where the proxy keeps `state.json` (see
+`./data` is mounted at `/data`, where the proxy keeps `state.sqlite` (see
 [State persistence](#state-persistence)).
 
 To use a JSON config file instead of `.env`, put it at `data/config.json` and
@@ -146,7 +161,8 @@ git clone https://github.com/tomakava/joulo-ocpp-proxy.git
 cd joulo-ocpp-proxy
 npm install
 npm run build
-PRIMARY_CSMS_URL=wss://your-csms.example.com/ocpp npm start
+mkdir -p data
+OUTBOX_FILE=./data/state.sqlite PRIMARY_CSMS_URL=wss://your-csms.example.com/ocpp npm start
 ```
 
 ## Configuration
@@ -260,7 +276,8 @@ effect there.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `CONFIG_FILE` | No | `/data/options.json` | Path to the JSON config file |
-| `STATE_FILE` | No | `/data/state.json` | Path to the persisted transaction ID mappings |
+| `STATE_FILE` | No | `/data/state.json` | Read-only legacy JSON mappings, imported once into the journal |
+| `OUTBOX_FILE` | No | `STATE_FILE` with `.json` replaced by `.sqlite` (normally `/data/state.sqlite`) | Persistent SQLite outbox; a non-JSON legacy filename gets `.sqlite` appended |
 | `PORT` | No | `9000` | Port the proxy listens on |
 | `PRIMARY_CSMS_URL` | No* | — | WebSocket URL of your primary CSMS (the default when `primary_csms_routes` is set) |
 | `SECONDARY_CSMS_URLS` | No | — | Comma-separated list of secondary CSMS URLs mirrored for every charger |
@@ -273,24 +290,84 @@ effect there.
 
 ### State persistence
 
-Because OCPP 1.6 transaction IDs are assigned per CSMS, the proxy keeps a map of
-primary → secondary transaction IDs for each charger. That map is written to
-`/data/state.json` (override with `STATE_FILE`) so a proxy restart or a charger
-reconnect in the middle of a transaction doesn't leave later `MeterValues` and
-`StopTransaction` carrying a transaction ID the secondary never issued.
+The journal atomically records report attempts, acknowledgements and OCPP 1.6
+transaction bindings. It uses SQLite's full synchronous commits and an exclusive
+single-owner lock, not delayed JSON snapshots. Active bindings do not expire
+after seven days. Closed transaction metadata is removed after seven days only
+when no retained report refers to it.
 
-- Writes are debounced (500 ms), atomic (write to `.tmp`, then rename) and
-  fsynced, so a power cut can't leave an empty file.
-- Entries older than 7 days are dropped at startup.
-- Mappings are kept per charger, secondary URL and the charger ID used on that
-  secondary, so two mappings to one URL under different `mapped_charger_id`s
-  don't overwrite each other. A secondary listed twice with the same URL and
-  charger ID is connected once, with a warning in the log.
-- Persistence is best-effort: if `/data` isn't writable the proxy logs one
-  warning and keeps running with in-memory mappings only.
+On upgrade, the old version-1 JSON file is imported once and left untouched.
+Legacy mappings are assigned to the first matching configured primary; changing
+primary routes during the upgrade requires reconciliation. Corrupt legacy data,
+an unsupported database version, or an unwritable database stops startup rather
+than silently starting with empty state. An old JSON file becomes stale after
+the upgrade: do not downgrade an active session assuming it contains new receipts.
 
-Mount a writable volume at `/data` to keep the file across restarts — the Home
-Assistant add-on does this for you.
+Older releases kept queued reports only in RAM; that queue cannot be imported
+from `state.json`. Drain the old outbox and upgrade between charging sessions.
+This upgrade cannot recover reports that an older release already discarded.
+
+Mount a writable persistent volume at `/data`; the Home Assistant app already
+does this. The journal is mode `0600` and contains private charging data, including
+possible RFID tags and vendor payloads. Protect its backups and exports. Successful
+routine reports are removed; failed reports, operator receipts and 2.x start
+deduplication receipts are retained. Size the volume for outages and retained data;
+no finite disk can guarantee storage for an unlimited outage.
+
+Home Assistant backups are **cold**: the app is stopped before copying the
+database, then restarted. Expect a brief OCPP reconnect; an in-flight start may
+need reconciliation. For Docker/manual backups, stop the proxy before copying
+its database. Do not copy a live SQLite file as though it were a consistent backup.
+
+#### Reporting health and reconciliation
+
+`GET /health` returns JSON with queued/error counts and the oldest pending age.
+It returns HTTP **503** for storage faults, unresolved reports, or a queue waiting
+at least 120 seconds. Otherwise it returns 200. This is delivery health, not proof
+of backend connectivity when there is no work, subsidy eligibility or payment.
+Keep the Home Assistant TCP watchdog for liveness; restarting on reporting
+failures does not resolve ambiguous receipts.
+
+Administration is **offline only**. Stop the proxy first: its exclusive database
+lock refuses a second proxy or administrator. There is no unauthenticated remote
+write API. With a built checkout:
+
+```bash
+node dist/delivery-cli.js status --db ./data/state.sqlite
+node dist/delivery-cli.js list --db ./data/state.sqlite
+node dist/delivery-cli.js export --db ./data/state.sqlite > private-reports.json
+```
+
+For Docker Compose, stop `ocpp-proxy`, then run the same command in a one-shot
+container sharing its data volume, for example:
+
+```bash
+docker compose stop ocpp-proxy
+docker compose run --rm --no-deps --entrypoint node ocpp-proxy dist/delivery-cli.js list
+```
+
+After confirming the outcome **with the backend**, resolve the listed delivery:
+
+```bash
+# Backend accepted this start; its transaction number is known.
+node dist/delivery-cli.js resolve --db ./data/state.sqlite --id 42 \
+  --outcome received --secondary-transaction-id 987 --note "Confirmed with backend operator"
+
+# Backend explicitly confirmed non-receipt: permit another attempt.
+node dist/delivery-cli.js resolve --db ./data/state.sqlite --id 42 \
+  --outcome not_received --note "Backend operator confirmed no accepted request"
+```
+
+For a missing primary response, also supply the confirmed
+`--primary-transaction-id`. `bind` attaches confirmed primary/secondary IDs to a
+blocked orphan meter/stop report. `discard --id ... --note ...` is an explicit
+decision to abandon a report; discarding a start also discards that session's
+dependent reports, without sending another backend's IDs. It does not stop the
+charger, reverse an accepted backend transaction, or erase the evidence.
+`list` omits raw payloads; `export` includes them. Protect both as private data.
+Restart the proxy after administration; pending delivery resumes on the next
+charger connection. Home Assistant users need host-level container access or
+an offline app-data backup/restore workflow to administer the database.
 
 ## Charger setup
 

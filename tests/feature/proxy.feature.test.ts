@@ -5,7 +5,8 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { startProxy } from "../../src/proxy";
+import { startProxy, type ProxyServer } from "../../src/proxy";
+import type { Config } from "../../src/config";
 import { rawDataToString } from "../../src/utils/websocket";
 
 interface WsRecord {
@@ -187,6 +188,7 @@ describe("proxy feature", () => {
   let primary: WsRecord;
   let secondary: WsRecord;
   let openChargers: WebSocket[] = [];
+  let proxies: ProxyServer[] = [];
 
   const allocatePort = (): Promise<number> =>
     new Promise((resolve, reject) => {
@@ -212,9 +214,11 @@ describe("proxy feature", () => {
     primary = createWsServer();
     secondary = createWsServer();
     openChargers = [];
+    proxies = [];
     // Keep the proxy's persisted state out of the real /data mount.
     stateDirectory = mkdtempSync(join(tmpdir(), "ocpp-proxy-state-"));
     vi.stubEnv("STATE_FILE", join(stateDirectory, "state.json"));
+    vi.stubEnv("OUTBOX_FILE", join(stateDirectory, "outbox.sqlite"));
   });
 
   afterEach(async () => {
@@ -224,6 +228,7 @@ describe("proxy feature", () => {
           }
       }
 
+      for (const proxy of proxies) await proxy.close();
       await closeAll([primary, secondary]);
 
       vi.unstubAllEnvs();
@@ -241,25 +246,23 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:${String(primaryPort)}`,
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [
+        {
+          url: `ws://127.0.0.1:${String(secondaryPort)}`,
           appendChargePointId: true,
-        },
-        secondaryCsms: [
-          {
-            url: `ws://127.0.0.1:${String(secondaryPort)}`,
-            appendChargePointId: true,
-          }
-        ],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-        },
-      }
-    );
+        }
+      ],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+      },
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/charger-1`,
@@ -278,7 +281,7 @@ describe("proxy feature", () => {
     charger.send(bootFrame);
 
     expect(await primaryMessage).toBe(bootFrame);
-    expect(await secondaryMessage).toBe(bootFrame);
+    expect(tryParseFrame(await secondaryMessage)?.slice(2)).toEqual(["BootNotification", {}]);
 
     const chargerMessage = waitForMessage(charger);
     primaryConn.send(responseFrame);
@@ -297,7 +300,7 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsms: {
         url: `ws://127.0.0.1:${String(primaryPort)}`,
@@ -313,7 +316,7 @@ describe("proxy feature", () => {
       loggerConfig: {
         logLevel: "error",
       },
-    });
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/charger-1`,
@@ -343,7 +346,8 @@ describe("proxy feature", () => {
     // unrecognized message type is never silently dropped from the mirror —
     // but not the response, which answers a request only the primary made.
     expect(primaryFrames).toEqual([resultFrame, garbageFrame, callFrame]);
-    expect(secondaryFrames).toEqual([garbageFrame, callFrame]);
+    expect(secondaryFrames[0]).toBe(garbageFrame);
+    expect(tryParseFrame(secondaryFrames[1])?.slice(2)).toEqual(["Heartbeat", {}]);
   });
 
   it("selects the primary by the path in front of the charge point ID", async () => {
@@ -355,7 +359,7 @@ describe("proxy feature", () => {
     const routedPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsms: {
         url: `ws://127.0.0.1:${String(defaultPort)}/default`,
@@ -373,7 +377,7 @@ describe("proxy feature", () => {
       secondaryCsms: [],
       secondariesByCharger: new Map(),
       loggerConfig: { logLevel: "error" },
-    });
+    }));
 
     const routedCharger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/site-a/cp-a`,
@@ -394,7 +398,7 @@ describe("proxy feature", () => {
     const primaryPort = await startWsServer(primary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsmsByPath: new Map([
         [
@@ -408,7 +412,7 @@ describe("proxy feature", () => {
       secondaryCsms: [],
       secondariesByCharger: new Map(),
       loggerConfig: { logLevel: "error" },
-    });
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/site-b/cp-1`,
@@ -427,21 +431,19 @@ describe("proxy feature", () => {
     const primaryPort = await startWsServer(primary);
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:${String(primaryPort)}`,
-          appendChargePointId: true,
-        },
-        secondaryCsms: [],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-          debugMessageMaxLength: 120,
-        },
-      }
-    );
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+        debugMessageMaxLength: 120,
+      },
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/ocpp/cp-query?foo=bar`,
@@ -462,21 +464,19 @@ describe("proxy feature", () => {
     const primaryPort = await startWsServer(primary);
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:${String(primaryPort)}/endpoint?tenant=emea`,
-          appendChargePointId: true,
-        },
-        secondaryCsms: [],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-          debugMessageMaxLength: 120,
-        },
-      }
-    );
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}/endpoint?tenant=emea`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+        debugMessageMaxLength: 120,
+      },
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-query?a=b&c=d`,
@@ -498,24 +498,22 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:${String(primaryPort)}`,
-          appendChargePointId: true,
-        },
-        secondaryCsms: [{
-          url: `ws://127.0.0.1:${String(secondaryPort)}/mirror?tenant=auditor`,
-          appendChargePointId: true,
-        }],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-          debugMessageMaxLength: 120,
-        },
-      }
-    );
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [{
+        url: `ws://127.0.0.1:${String(secondaryPort)}/mirror?tenant=auditor`,
+        appendChargePointId: true,
+      }],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+        debugMessageMaxLength: 120,
+      },
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-secondary?foo=bar`,
@@ -538,20 +536,18 @@ describe("proxy feature", () => {
     const primaryPort = await startWsServer(primary);
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:${String(primaryPort)}`,
-          appendChargePointId: true,
-        },
-        secondaryCsms: [],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-        },
-      }
-    );
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+      },
+    }));
 
     const charger = await connectWhenOpen(`ws://127.0.0.1:${String(proxyPort)}/`, "ocpp1.6");
     openChargers.push(charger);
@@ -564,20 +560,18 @@ describe("proxy feature", () => {
   it("drops charger connection when primary is unavailable", async () => {
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:9`,
-          appendChargePointId: true,
-        },
-        secondaryCsms: [],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-        },
-      }
-    );
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:9`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+      },
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-offline`,
@@ -611,20 +605,18 @@ describe("proxy feature", () => {
     const primaryPort = await startWsServer(primary);
     const proxyPort = await allocatePort();
 
-    startProxy(
-      {
-        port: proxyPort,
-        primaryCsms: {
-          url: `ws://127.0.0.1:${String(primaryPort)}`,
-          appendChargePointId: true,
-        },
-        secondaryCsms: [],
-        secondariesByCharger: new Map(),
-        loggerConfig: {
-          logLevel: "error",
-        },
-      }
-    );
+    proxies.push(startProxy({
+      port: proxyPort,
+      primaryCsms: {
+        url: `ws://127.0.0.1:${String(primaryPort)}`,
+        appendChargePointId: true,
+      },
+      secondaryCsms: [],
+      secondariesByCharger: new Map(),
+      loggerConfig: {
+        logLevel: "error",
+      },
+    }));
 
     const firstCharger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-reconnect`,
@@ -671,7 +663,7 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsms: {
         url: `ws://127.0.0.1:${String(primaryPort)}`,
@@ -694,7 +686,7 @@ describe("proxy feature", () => {
       loggerConfig: {
         logLevel: "error",
       },
-    });
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-mapped`,
@@ -718,8 +710,8 @@ describe("proxy feature", () => {
       // frame ships. start-1 is left alone: the test answers that one itself,
       // with the transaction ID this secondary assigns.
       const frame = tryParseFrame(raw);
-      if (frame?.[0] === 2 && frame[1] !== "start-1") {
-        secondaryConn.send(JSON.stringify([3, frame[1], {}]));
+      if (frame?.[0] === 2 && frame[2] !== "StartTransaction") {
+        secondaryConn.send(JSON.stringify([3, frame[1], frame[2] === "BootNotification" ? { status: "Accepted" } : {}]));
       }
     });
 
@@ -735,14 +727,12 @@ describe("proxy feature", () => {
     );
     await primaryStart;
 
-    // The mirror is sequential, so start-1 only goes out once boot-1 has been
-    // answered. Wait for it to actually arrive before answering it — an answer
-    // to a frame still queued is not an acknowledgement of anything.
-    await waitFor(() => secondaryFrames.length >= 2);
-
-    // Each CSMS assigns its own transaction ID.
+    // A primary rejection must not open a phantom transaction on the mirror.
     primaryConn.send('[3,"start-1",{"transactionId":111,"idTagInfo":{"status":"Accepted"}}]');
-    secondaryConn.send('[3,"start-1",{"transactionId":222,"idTagInfo":{"status":"Accepted"}}]');
+    await waitFor(() => secondaryFrames.length >= 2);
+    const mirroredStart = tryParseFrame(secondaryFrames[1]);
+    if (!mirroredStart) throw new Error("Expected the mirrored start");
+    secondaryConn.send(JSON.stringify([3, mirroredStart[1], { transactionId: 222, idTagInfo: { status: "Accepted" } }]));
     await sleep(150);
 
     // MeterValues for primary transaction 111 must reach the secondary as 222.
@@ -773,7 +763,7 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsms: {
         url: `ws://127.0.0.1:${String(primaryPort)}`,
@@ -789,7 +779,7 @@ describe("proxy feature", () => {
       loggerConfig: {
         logLevel: "error",
       },
-    });
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-commands`,
@@ -843,7 +833,7 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsms: {
         url: `ws://127.0.0.1:${String(primaryPort)}`,
@@ -859,7 +849,7 @@ describe("proxy feature", () => {
       loggerConfig: {
         logLevel: "error",
       },
-    });
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-refusals`,
@@ -903,7 +893,7 @@ describe("proxy feature", () => {
     const secondaryPort = await startWsServer(secondary);
     const proxyPort = await allocatePort();
 
-    startProxy({
+    proxies.push(startProxy({
       port: proxyPort,
       primaryCsms: {
         url: `ws://127.0.0.1:${String(primaryPort)}`,
@@ -919,7 +909,7 @@ describe("proxy feature", () => {
       loggerConfig: {
         logLevel: "error",
       },
-    });
+    }));
 
     const charger = await connectWhenOpen(
       `ws://127.0.0.1:${String(proxyPort)}/cp-one-at-a-time`,
@@ -967,4 +957,98 @@ describe("proxy feature", () => {
     expect(secondaryFrames).toEqual(['[3,"42",{"status":"Accepted"}]']);
     expect(primaryFrames).toHaveLength(1);
   });
+
+  it("restores queued telemetry and never duplicates an ambiguous start after a proxy restart", async () => {
+    const primaryPort = await startWsServer(primary);
+    const secondaryPort = await startWsServer(secondary);
+    const proxyPort = await allocatePort();
+    const reports: { relayId: string; action: unknown; payload: unknown }[] = [];
+    let acknowledgeMeters = false;
+    let acknowledgeStarts = true;
+    primary.server.on("connection", socket => {
+      socket.on("message", data => {
+        const frame = tryParseFrame(rawDataToString(data));
+        if (frame?.[0] !== 2) return;
+        socket.send(JSON.stringify([3, frame[1], frame[2] === "StartTransaction"
+          ? { transactionId: 111, idTagInfo: { status: "Accepted" } } : {}]));
+      });
+    });
+    secondary.server.on("connection", socket => {
+      socket.on("message", data => {
+        const frame = tryParseFrame(rawDataToString(data));
+        if (frame?.[0] !== 2) return;
+        reports.push({ relayId: frame[1], action: frame[2], payload: frame[3] });
+        if (frame[2] === "MeterValues" && !acknowledgeMeters) return;
+        if (frame[2] === "StartTransaction" && !acknowledgeStarts) return;
+        socket.send(JSON.stringify([3, frame[1], frame[2] === "StartTransaction"
+          ? { transactionId: 222, idTagInfo: { status: "Accepted" } } : {}]));
+      });
+    });
+    const config: Config = {
+      port: proxyPort,
+      primaryCsms: { url: `ws://127.0.0.1:${String(primaryPort)}`, appendChargePointId: true },
+      secondaryCsms: [{ url: `ws://127.0.0.1:${String(secondaryPort)}`, appendChargePointId: true }],
+      secondariesByCharger: new Map(),
+      loggerConfig: { logLevel: "error" },
+    };
+    const connectCharger = async () => {
+      const primaryConnection = waitForConnection(primary);
+      const secondaryConnection = waitForConnection(secondary);
+      const charger = await connectWhenOpen(`ws://127.0.0.1:${String(proxyPort)}/CP-RESTART`, "ocpp1.6");
+      openChargers.push(charger);
+      await Promise.all([primaryConnection, secondaryConnection]);
+      return charger;
+    };
+    let proxy = startProxy(config);
+    proxies.push(proxy);
+    let charger = await connectCharger();
+    let response = waitForMessage(charger);
+    charger.send('[2,"start","StartTransaction",{"connectorId":1,"meterStart":0,"timestamp":"2026-01-01T00:00:00Z"}]');
+    await response;
+    await waitFor(() => reports.some(row => row.action === "StartTransaction"));
+    response = waitForMessage(charger);
+    charger.send('[2,"meter","MeterValues",{"connectorId":1,"transactionId":111,"meterValue":[]}]');
+    await response;
+    await waitFor(() => reports.some(row => row.action === "MeterValues"));
+    const firstMeter = reports.find(row => row.action === "MeterValues");
+    if (!firstMeter) throw new Error("Expected initial telemetry");
+    const closed = waitForClose(charger);
+    await proxy.close();
+    await closed;
+
+    acknowledgeMeters = true;
+    proxy = startProxy(config);
+    proxies.push(proxy);
+    charger = await connectCharger();
+    await waitFor(() => reports.filter(row => row.action === "MeterValues").length === 2);
+    const replayed = reports.filter(row => row.action === "MeterValues")[1];
+    expect(replayed.payload).toMatchObject({ transactionId: 222 });
+    expect(replayed.relayId).toBe(firstMeter.relayId);
+    expect(reports.filter(row => row.action === "StartTransaction")).toHaveLength(1);
+    response = waitForMessage(charger);
+    charger.send('[2,"stop","StopTransaction",{"transactionId":111,"meterStop":42}]');
+    await response;
+    await waitFor(() => reports.some(row => row.action === "StopTransaction"));
+    expect(reports.find(row => row.action === "StopTransaction")?.payload).toMatchObject({ transactionId: 222 });
+
+    acknowledgeStarts = false;
+    response = waitForMessage(charger);
+    charger.send('[2,"next-start","StartTransaction",{"connectorId":1,"meterStart":42,"timestamp":"2026-01-01T00:01:00Z"}]');
+    await response;
+    await waitFor(() => reports.filter(row => row.action === "StartTransaction").length === 2);
+    const nextClosed = waitForClose(charger);
+    await proxy.close();
+    await nextClosed;
+    proxy = startProxy(config);
+    proxies.push(proxy);
+    charger = await connectCharger();
+    const health = await fetch(`http://127.0.0.1:${String(proxyPort)}/health`);
+    expect(health.status).toBe(503);
+    const body: unknown = await health.json();
+    expect(body).toMatchObject({ status: "degraded", counts: { uncertain: 1 } });
+    response = waitForMessage(charger);
+    charger.send('[2,"still-controlled","Heartbeat",{}]');
+    expect(tryParseFrame(await response)).toEqual([3, "still-controlled", {}]);
+    expect(reports.filter(row => row.action === "StartTransaction")).toHaveLength(2);
+  }, 15_000);
 });

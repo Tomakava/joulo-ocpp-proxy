@@ -165,17 +165,33 @@ until the charger has replied, and the primary's requests always go first. If
 the charger can't be reached or doesn't answer within 30 seconds, the secondary
 gets an error reply instead.
 
-Each secondary must reply to the messages it receives, as a normal backend
-does. The proxy waits for each reply before sending the next message, resends
-an unanswered message after 2 minutes, and skips it after a second timeout.
-While a secondary is unreachable, the proxy keeps the most recent 100 messages
-for it, reconnects every 10 seconds and sends them in order once it's back.
+Mirrored reports are saved in `/data/state.sqlite` before they are sent. Queues
+and confirmed transaction numbers survive charger disconnects and app restarts;
+there is no 100-message eviction limit. Delivery resumes when the charger
+reconnects. Old `state.json` mappings are imported once without changing the file.
 
-For OCPP 1.6 chargers, each backend gives out its own transaction numbers. The
-proxy translates them so that meter values and stop messages reach each
-secondary with the number that secondary gave. These translations are saved
-in the app's data folder, so a restart in the middle of a charging session
-doesn't break them. They are included in Home Assistant backups.
+A missing reply to a transaction start is **uncertain**, not permission to start
+it again. The report is retained and that secondary waits for reconciliation.
+Rejected critical reports are retained too. Other unanswered messages are retried
+after two minutes and retained as unconfirmed after a second timeout, allowing
+later reports to proceed. No transaction ID is borrowed from the primary when
+the secondary's ID is unknown. Only the primary may control the charger.
+
+Check `http://<home-assistant-ip>:<proxy-port>/health` for reporting health. HTTP
+503 means a storage fault, unresolved report or queue older than two minutes.
+The TCP watchdog still checks liveness, not reporting or reward eligibility.
+Monitor disk space: a full or failed disk can still lose new uncommitted mirror
+copies even though primary charging control continues.
+
+Backups stop the app before copying its SQLite journal, then restart it. Expect
+a brief OCPP reconnect. Keep backups private; reports can contain RFID tags and
+charging history. Do not copy the live database manually.
+
+The [README's offline administration guide](https://github.com/tomakava/joulo-ocpp-proxy#reporting-health-and-reconciliation)
+explains inspection, export and reconciliation. Stop the app before operating
+on its database, and confirm uncertain outcomes with the backend. Home Assistant
+administration needs host-level container access or an offline app-data
+backup/restore workflow; never expose a writable administration port on the LAN.
 
 ## Troubleshooting
 
@@ -204,10 +220,11 @@ is empty. Fix the path in the charger, or add a route for it.
 - `Unexpected server response: 401` (or `403`) means the backend refused the
   credentials. Check **Charger ID on this backend** and **Backend password**.
 
-**A secondary shows charging sessions twice.** When a start-of-charging
-message goes unanswered, it is resent. OCPP 1.6 gives the backend no ID to
-tell the copy from a new session, so some backends record it twice. Check
-that the backend answers promptly.
+**Reporting is stalled but charging still works.** Check `/health` and the log
+for an uncertain or rejected delivery ID. An unanswered start is deliberately
+not retried: its backend may already have accepted it. Reconcile its outcome
+and transaction number before permitting a retry. A protocol acknowledgement
+or visible energy total is not proof of reward eligibility or payout.
 
 ## Support
 

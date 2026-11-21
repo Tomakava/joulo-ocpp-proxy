@@ -1,413 +1,304 @@
-import { tmpdir } from "os";
-import { join } from "path";
-
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { CsmsBackend, SecondaryTarget } from "../../src/config";
-
 import { ChargerConnection } from "../../src/connection";
-import { StateStore } from "../../src/state";
+import { OutboxStore } from "../../src/outbox";
 
-interface WsConnectCall {
-  url: string;
-  protocols: string | string[] | undefined;
-}
-
-/** The parts of the mock socket these tests drive or inspect. */
 interface MockSocket {
   readyState: number;
-  /** Frames handed to send(), in order. */
   sent: string[];
-  /** When true, the next send() throws, as `ws` does on a closing socket. */
   failNextSend: boolean;
   emit: (event: string, ...args: unknown[]) => void;
 }
 
-let connectCalls: WsConnectCall[] = [];
+let connectCalls: { url: string; protocols: string | string[] | undefined }[] = [];
 let sockets: MockSocket[] = [];
+const stores = new Set<OutboxStore>();
+const connections = new Set<ChargerConnection>();
 
-/*
- * ChargerConnection creates outbound WebSocket instances internally. Mocking
- * the module is the smallest seam that lets this unit test inspect connection
- * arguments, drive socket events, and fail a send without opening real network
- * connections.
- */
 vi.mock("ws", () => {
   class MockWebSocket {
     static CONNECTING = 0;
     static OPEN = 1;
     static CLOSING = 2;
     static CLOSED = 3;
-
     readyState = MockWebSocket.OPEN;
     sent: string[] = [];
     failNextSend = false;
     private handlers = new Map<string, ((...args: unknown[]) => void)[]>();
 
     constructor(url: string | null, protocols?: string | string[]) {
-      if (url !== null) {
-        connectCalls.push({ url, protocols });
-      }
+      if (url !== null) connectCalls.push({ url, protocols });
       sockets.push(this);
     }
-
     on(event: string, handler: (...args: unknown[]) => void) {
-      const existing = this.handlers.get(event);
-      if (existing) existing.push(handler);
-      else this.handlers.set(event, [handler]);
+      const handlers = this.handlers.get(event) ?? [];
+      handlers.push(handler);
+      this.handlers.set(event, handlers);
       return this;
     }
-
     emit(event: string, ...args: unknown[]) {
-      for (const handler of this.handlers.get(event) ?? []) {
-        handler(...args);
-      }
+      for (const handler of this.handlers.get(event) ?? []) handler(...args);
     }
-
-    send(data: string) {
+    send(raw: string) {
       if (this.failNextSend) {
         this.failNextSend = false;
         throw new Error("socket is closing");
       }
-      this.sent.push(data);
-      return undefined;
+      this.sent.push(raw);
     }
     close() {
+      if (this.readyState === MockWebSocket.CLOSED) return;
       this.readyState = MockWebSocket.CLOSED;
+      this.emit("close", 1000, Buffer.from(""));
     }
-    ping() {
-      return undefined;
-    }
-    pong() {
-      return undefined;
-    }
+    ping() { this.emit("pong"); }
+    pong() { /* The test peer already observes the ping. */ }
   }
-
-  return {
-    default: MockWebSocket,
-  };
+  return { default: MockWebSocket };
 });
 
 beforeEach(() => {
+  vi.useFakeTimers();
   connectCalls = [];
   sockets = [];
 });
 
-/** Persistence isn't under test here; keep it off the real /data path. */
-function createTestStore() {
-  return new StateStore(join(tmpdir(), "ocpp-proxy-connection-test-state.json"));
-}
+afterEach(() => {
+  for (const connection of connections) connection.teardown();
+  for (const store of stores) store.close();
+  connections.clear();
+  stores.clear();
+  vi.useRealTimers();
+});
 
-function createMockChargerSocket() {
-  // `null` is handled by the WebSocket mock above; the real `ws` constructor
-  // cannot be used this way outside this test.
-  return new WebSocket(null);
-}
-
-/** Mirrors src/connection.ts — these drive the fake-timer assertions below. */
-const RECONNECT_DELAY_MS = 10_000;
-const ACK_TIMEOUT_MS = 120_000;
-
-/**
- * A connection with one unmapped secondary, and the three sockets it created.
- * The charger socket is returned as a MockSocket so tests can drive its events.
- */
-function createMirrorFixture(chargePointId: string) {
-  const backend = {
-    url: "ws://csms.example/endpoint",
-    appendChargePointId: false,
-  };
-
+function fixture(options: {
+  store?: OutboxStore;
+  primary?: CsmsBackend;
+  secondary?: SecondaryTarget;
+  protocol?: string;
+} = {}): Fixture {
+  const store = options.store ?? new OutboxStore(":memory:", null);
+  stores.add(store);
+  const firstSocket = sockets.length;
   const connection = new ChargerConnection(
-    createMockChargerSocket(),
-    chargePointId,
-    backend,
-    [{ ...backend, mappedChargerId: chargePointId }],
-    "ocpp1.6",
-    undefined,
-    createTestStore()
+    new WebSocket(null), "CP-1",
+    options.primary ?? { url: "ws://primary.example/ocpp", appendChargePointId: true },
+    [options.secondary ?? { url: "ws://secondary.example/ocpp", appendChargePointId: true, mappedChargerId: "CP-1" }],
+    options.protocol ?? "ocpp1.6", undefined, store,
   );
-
-  const [charger, primarySocket, secondarySocket] = sockets;
-  return { connection, charger, primarySocket, secondarySocket };
+  connections.add(connection);
+  const [charger, primary, secondary] = sockets.slice(firstSocket);
+  secondary.emit("open");
+  return { connection, charger, primary, secondary, store };
 }
 
-describe("ChargerConnection", () => {
+interface Fixture {
+  connection: ChargerConnection;
+  charger: MockSocket;
+  primary: MockSocket;
+  secondary: MockSocket;
+  store: OutboxStore;
+}
+type Call = [number, string, string, Record<string, unknown>];
+
+function callAt(socket: MockSocket, index = -1): Call {
+  const raw = socket.sent.at(index);
+  if (raw === undefined) throw new Error("Expected a wire frame");
+  return JSON.parse(raw) as Call;
+}
+
+function answer(socket: MockSocket, payload: Record<string, unknown> = {}, index = -1) {
+  socket.emit("message", Buffer.from(JSON.stringify([3, callAt(socket, index)[1], payload])));
+}
+
+function send(f: Fixture, id: string, action: string, payload: Record<string, unknown> = {}) {
+  f.charger.emit("message", Buffer.from(JSON.stringify([2, id, action, payload])));
+}
+
+function start(f: Fixture) {
+  send(f, "start-1", "StartTransaction", { connectorId: 1, idTag: "CARD-1", meterStart: 0, timestamp: "2026-01-01T00:00:00Z" });
+  answer(f.primary, { transactionId: 111, idTagInfo: { status: "Accepted" } });
+  answer(f.secondary, { transactionId: 222, idTagInfo: { status: "Accepted" } });
+}
+
+describe("ChargerConnection delivery", () => {
   it.each([
-    {
-      description: "opens primary and secondary connections using resolved URLs",
-      appendChargePointId: true,
-      primaryUrl: "ws://csms.example/endpoint",
-      secondaryUrl: "ws://secondary.example/inspect",
-      protocol: "ocpp1.6",
-      expectedPrimaryUrl: "ws://csms.example/endpoint/cp-abc",
-      expectedSecondaryUrl: "ws://secondary.example/inspect/cp-abc",
-    },
-    {
-      description: "keeps connection URLs unchanged when appending is disabled",
-      appendChargePointId: false,
-      primaryUrl: "ws://csms.example/raw-endpoint?tenant=emea",
-      secondaryUrl: "ws://secondary.example/raw-mirror?source=mirror",
-      protocol: "ocpp2.0.1",
-      expectedPrimaryUrl: "ws://csms.example/raw-endpoint?tenant=emea",
-      expectedSecondaryUrl:
-        "ws://secondary.example/raw-mirror?source=mirror",
-    },
-  ])(
-    "$description",
-    ({
-      appendChargePointId,
-      primaryUrl,
-      secondaryUrl,
+    { append: true, protocol: "ocpp1.6", suffix: "/CP-1" },
+    { append: false, protocol: "ocpp2.0.1", suffix: "" },
+  ])("preserves backend URL and protocol selection ($protocol)", ({ append, protocol, suffix }) => {
+    fixture({
+      primary: { url: "ws://primary.example/ocpp", appendChargePointId: append },
+      secondary: { url: "ws://secondary.example/ocpp", appendChargePointId: append, mappedChargerId: "CP-1" },
       protocol,
-      expectedPrimaryUrl,
-      expectedSecondaryUrl,
-    }) => {
-      const charger = createMockChargerSocket();
-      const primary: CsmsBackend = {
-        url: primaryUrl,
-        appendChargePointId,
-      };
-      const secondary: SecondaryTarget = {
-        url: secondaryUrl,
-        appendChargePointId,
-        mappedChargerId: "cp-abc",
-      };
-
-      new ChargerConnection(
-        charger,
-        "cp-abc",
-        primary,
-        [secondary],
-        protocol,
-        undefined,
-        createTestStore(),
-      );
-
-      expect(connectCalls).toEqual([
-        { url: expectedPrimaryUrl, protocols: [protocol] },
-        { url: expectedSecondaryUrl, protocols: [protocol] },
-      ]);
-    }
-  );
-
-  it("queues a mirrored frame when the secondary send fails, and replays it on reconnect", () => {
-    const charger = createMockChargerSocket();
-    const primary: CsmsBackend = {
-      url: "ws://csms.example/endpoint",
-      appendChargePointId: false,
-    };
-    const secondary: SecondaryTarget = {
-      ...primary,
-      mappedChargerId: "cp-queue",
-    };
-
-    const connection = new ChargerConnection(
-      charger,
-      "cp-queue",
-      primary,
-      [secondary],
-      "ocpp1.6",
-      undefined,
-      createTestStore(),
-    );
-
-    // sockets: [charger, primary, secondary]
-    const [chargerSocket, primarySocket, secondarySocket] = sockets;
-    const frame = '[2,"m-1","Heartbeat",{}]';
-
-    secondarySocket.failNextSend = true;
-    chargerSocket.emit("message", Buffer.from(frame));
-
-    // The primary still got it, and the failed mirror wasn't dropped...
-    expect(primarySocket.sent).toEqual([frame]);
-    expect(secondarySocket.sent).toEqual([]);
-
-    // ...it was queued, and goes out when the secondary comes back.
-    secondarySocket.emit("open");
-    expect(secondarySocket.sent).toEqual([frame]);
-
-    connection.teardown();
-  });
-
-  it("holds a mirrored CALL until the secondary answers it", () => {
-    const { charger, connection, secondarySocket } = createMirrorFixture("cp-seq");
-
-    charger.emit("message", Buffer.from('[2,"m-1","Heartbeat",{}]'));
-    charger.emit("message", Buffer.from('[2,"m-2","Heartbeat",{}]'));
-
-    // Only the first is in flight: OCPP is request/response, and the frames
-    // behind it may need what its answer carries.
-    expect(secondarySocket.sent).toEqual(['[2,"m-1","Heartbeat",{}]']);
-
-    secondarySocket.emit("message", Buffer.from('[3,"m-1",{}]'));
-    expect(secondarySocket.sent).toEqual([
-      '[2,"m-1","Heartbeat",{}]',
-      '[2,"m-2","Heartbeat",{}]',
+    });
+    expect(connectCalls).toEqual([
+      { url: `ws://primary.example/ocpp${suffix}`, protocols: [protocol] },
+      { url: `ws://secondary.example/ocpp${suffix}`, protocols: [protocol] },
     ]);
-
-    connection.teardown();
   });
 
-  it("mirrors a frame it cannot decode without waiting for an answer to it", () => {
-    const { charger, connection, secondarySocket } = createMirrorFixture("cp-raw");
-
-    // An undecodable frame has no message ID, so no answer can ever match it;
-    // it must not become a barrier the rest of the mirror queues behind.
-    charger.emit("message", Buffer.from("not-ocpp"));
-    charger.emit("message", Buffer.from('[2,"m-1","Heartbeat",{}]'));
-
-    expect(secondarySocket.sent).toEqual([
-      "not-ocpp",
-      '[2,"m-1","Heartbeat",{}]',
-    ]);
-
-    connection.teardown();
+  it("keeps primary forwarding alive when a secondary send fails", () => {
+    const f = fixture();
+    f.secondary.failNextSend = true;
+    send(f, "heartbeat", "Heartbeat");
+    expect(callAt(f.primary)).toEqual([2, "heartbeat", "Heartbeat", {}]);
+    expect(f.secondary.sent).toEqual([]);
+    f.secondary.emit("open");
+    expect(callAt(f.secondary).slice(2)).toEqual(["Heartbeat", {}]);
+    answer(f.secondary);
+    expect(f.store.inspect()).toEqual([]);
   });
 
-  /*
-   * The incident this queue exists for: a secondary's socket went half-open, so
-   * send() reported success for a StartTransaction and a MeterValues that never
-   * arrived. Nothing was queued, and when the socket finally dropped ~60s later
-   * only the frames from after the close were replayed — leaving that secondary
-   * with no transaction ID for the session, and every later MeterValues carrying
-   * the primary's ID instead.
-   */
-  it("replays frames a half-open secondary never acknowledged, and rewrites the ones behind them", () => {
-    vi.useFakeTimers();
-    try {
-      const { charger, connection, secondarySocket, primarySocket } =
-        createMirrorFixture("cp-halfopen");
+  it("sends one mirrored CALL at a time and keeps retries' relay IDs stable", () => {
+    const f = fixture();
+    send(f, "one", "Heartbeat");
+    send(f, "two", "Heartbeat");
+    expect(f.secondary.sent).toHaveLength(1);
+    const first = f.secondary.sent[0];
+    vi.advanceTimersByTime(120_000);
+    expect(f.secondary.sent).toEqual([first, first]);
+    answer(f.secondary);
+    expect(callAt(f.secondary)[2]).toBe("Heartbeat");
+    expect(callAt(f.secondary)[1]).not.toBe(callAt(f.secondary, 0)[1]);
+    answer(f.secondary);
+    expect(f.store.inspect()).toEqual([]);
+  });
 
-      const startFrame =
-        '[2,"start-1","StartTransaction",{"connectorId":1,"idTag":"CARD-1","meterStart":0}]';
+  it("does not mistake a reused charger RPC ID or a late reply for a newer delivery", () => {
+    const f = fixture();
+    send(f, "reused", "Heartbeat");
+    const firstRelay = callAt(f.secondary)[1];
+    vi.advanceTimersByTime(240_000);
+    send(f, "reused", "Heartbeat");
+    const secondRelay = callAt(f.secondary)[1];
+    expect(secondRelay).not.toBe(firstRelay);
+    f.secondary.emit("message", Buffer.from(JSON.stringify([3, firstRelay, {}])));
+    expect(f.store.inspect().map(row => [row.relayId, row.state])).toEqual([[secondRelay, "inflight"]]);
+    answer(f.secondary);
+    expect(f.store.inspect()).toEqual([]);
+  });
 
-      charger.emit("message", Buffer.from(startFrame));
-      primarySocket.emit(
-        "message",
-        Buffer.from('[3,"start-1",{"transactionId":111,"idTagInfo":{"status":"Accepted"}}]')
-      );
+  it("retains unparseable reports without blocking valid reports behind them", () => {
+    const f = fixture();
+    f.charger.emit("message", Buffer.from("not-ocpp"));
+    send(f, "heartbeat", "Heartbeat");
+    expect(f.secondary.sent[0]).toBe("not-ocpp");
+    expect(callAt(f.secondary)[2]).toBe("Heartbeat");
+    answer(f.secondary);
+    expect(f.store.inspect().map(row => [row.raw, row.state])).toEqual([["not-ocpp", "unconfirmed"]]);
+    expect(f.store.health().status).toBe("degraded");
+  });
 
-      // The frame was written to a socket that still looks open...
-      expect(secondarySocket.sent).toEqual([startFrame]);
+  it("requires the primary to accept a start before opening a secondary transaction", () => {
+    const f = fixture();
+    send(f, "start", "StartTransaction", { connectorId: 1, meterStart: 0 });
+    expect(f.secondary.sent).toEqual([]);
+    answer(f.primary, { transactionId: 111, idTagInfo: { status: "Invalid" } });
+    send(f, "heartbeat", "Heartbeat");
+    expect(callAt(f.secondary)[2]).toBe("Heartbeat");
+    expect(f.store.inspect().find(row => row.action === "StartTransaction")?.state).toBe("cancelled");
+  });
 
-      // ...so the MeterValues behind it waits, rather than going out with a
-      // transaction ID this secondary never issued.
-      charger.emit(
-        "message",
-        Buffer.from('[2,"meter-1","MeterValues",{"connectorId":1,"transactionId":111}]')
-      );
-      expect(secondarySocket.sent).toEqual([startFrame]);
+  it("never replays an ambiguous transaction start and still forwards primary traffic", () => {
+    const f = fixture();
+    send(f, "start", "StartTransaction", { connectorId: 1, meterStart: 0 });
+    answer(f.primary, { transactionId: 111, idTagInfo: { status: "Accepted" } });
+    send(f, "meter", "MeterValues", { transactionId: 111 });
+    f.secondary.readyState = WebSocket.CLOSED;
+    f.secondary.emit("close", 1006, Buffer.from(""));
+    vi.advanceTimersByTime(10_000);
+    const reconnected = sockets[sockets.length - 1];
+    reconnected.emit("open");
+    expect(reconnected.sent).toEqual([]);
+    send(f, "heartbeat", "Heartbeat");
+    expect(callAt(f.primary)[2]).toBe("Heartbeat");
+    const unresolved = f.store.inspect().find(row => row.action === "StartTransaction");
+    expect(unresolved?.state).toBe("uncertain");
+    if (!unresolved) throw new Error("Start receipt missing");
+    f.store.resolve(unresolved.id, "received", "Backend confirmed its transaction ID", "222");
+    reconnected.emit("open");
+    expect(callAt(reconnected)[3].transactionId).toBe(222);
+    expect(f.store.health().counts?.reconciled).toBe(1);
+  });
 
-      // The socket was dead all along; it finally drops.
-      secondarySocket.readyState = WebSocket.CLOSED;
-      secondarySocket.emit("close", 1006, Buffer.from(""));
-      vi.advanceTimersByTime(RECONNECT_DELAY_MS);
+  it("blocks a start immediately on an acknowledgement timeout, without resending it", () => {
+    const f = fixture();
+    send(f, "start", "StartTransaction", { connectorId: 1, meterStart: 0 });
+    answer(f.primary, { transactionId: 111, idTagInfo: { status: "Accepted" } });
+    vi.advanceTimersByTime(240_000);
+    expect(f.secondary.sent).toHaveLength(1);
+    expect(f.store.inspect()[0].state).toBe("uncertain");
+  });
 
-      const reconnected = sockets[sockets.length - 1];
-      reconnected.emit("open");
+  it("retains failed periodic reports and continues delivery instead of deleting them", () => {
+    const f = fixture();
+    send(f, "one", "Heartbeat");
+    send(f, "two", "Heartbeat");
+    vi.advanceTimersByTime(240_000);
+    expect(f.store.inspect().map(row => row.state)).toEqual(["unconfirmed", "inflight"]);
+    answer(f.secondary);
+    expect(f.store.inspect().map(row => row.state)).toEqual(["unconfirmed"]);
+  });
 
-      // The StartTransaction is replayed first — the MeterValues still can't go.
-      expect(reconnected.sent).toEqual([startFrame]);
-
-      reconnected.emit(
-        "message",
-        Buffer.from('[3,"start-1",{"transactionId":222,"idTagInfo":{"status":"Accepted"}}]')
-      );
-
-      // With the mapping finally known, the waiting MeterValues is rewritten
-      // with it — the rewrite is derived when the frame is sent, not when it
-      // was queued.
-      expect(reconnected.sent).toHaveLength(2);
-      const meter = JSON.parse(reconnected.sent[1]) as [
-        number,
-        string,
-        string,
-        Record<string, unknown>,
-      ];
-      expect(meter[3].transactionId).toBe(222);
-
-      connection.teardown();
-    } finally {
-      vi.useRealTimers();
+  it("preserves all reports through an outage larger than the old 100-frame limit", () => {
+    const f = fixture();
+    f.secondary.readyState = WebSocket.CLOSED;
+    for (let sequence = 0; sequence < 151; sequence++) send(f, `report-${String(sequence)}`, "MeterValues", { sequence });
+    f.secondary.readyState = WebSocket.OPEN;
+    f.secondary.emit("open");
+    const delivered: unknown[] = [];
+    for (let sequence = 0; sequence < 151; sequence++) {
+      delivered.push(callAt(f.secondary)[3].sequence);
+      answer(f.secondary);
     }
+    expect(delivered).toEqual(Array.from({ length: 151 }, (_, sequence) => sequence));
+    expect(f.store.inspect()).toEqual([]);
   });
 
-  it("resends an unanswered CALL, then gives up so the mirror keeps moving", () => {
-    vi.useFakeTimers();
-    try {
-      const { charger, connection, secondarySocket } =
-        createMirrorFixture("cp-timeout");
-
-      charger.emit("message", Buffer.from('[2,"m-1","Heartbeat",{}]'));
-      charger.emit("message", Buffer.from('[2,"m-2","Heartbeat",{}]'));
-      expect(secondarySocket.sent).toEqual(['[2,"m-1","Heartbeat",{}]']);
-
-      // The socket stays open and the secondary stays silent, so m-1 is resent.
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-      expect(secondarySocket.sent).toEqual([
-        '[2,"m-1","Heartbeat",{}]',
-        '[2,"m-1","Heartbeat",{}]',
-      ]);
-
-      // Still nothing. Out of tries: m-1 is abandoned rather than blocking m-2
-      // forever, and the queue moves on.
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-      expect(secondarySocket.sent[2]).toBe('[2,"m-2","Heartbeat",{}]');
-
-      connection.teardown();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("keeps queued data across charger connection teardown", () => {
+    const f = fixture();
+    f.secondary.readyState = WebSocket.CLOSED;
+    send(f, "queued", "MeterValues", { value: 123 });
+    f.connection.teardown();
+    const next = fixture({ store: f.store });
+    expect(callAt(next.secondary).slice(2)).toEqual(["MeterValues", { value: 123 }]);
+    answer(next.secondary);
+    expect(next.store.inspect()).toEqual([]);
   });
 
-  it("keeps a transaction mapping until the secondary acknowledges the StopTransaction", () => {
-    vi.useFakeTimers();
-    try {
-      const { charger, connection, secondarySocket, primarySocket } =
-        createMirrorFixture("cp-stop");
+  it("rewrites a retried stop with its confirmed ID and keeps rejected stops visible", () => {
+    const f = fixture();
+    start(f);
+    send(f, "stop", "StopTransaction", { transactionId: 111, meterStop: 42 });
+    expect(callAt(f.secondary)[3].transactionId).toBe(222);
+    const wire = f.secondary.sent.at(-1);
+    vi.advanceTimersByTime(120_000);
+    expect(f.secondary.sent.at(-1)).toBe(wire);
+    const relayId = callAt(f.secondary)[1];
+    f.secondary.emit("message", Buffer.from(JSON.stringify([4, relayId, "InternalError", "not stored", {}])));
+    const rejected = f.store.inspect()[0];
+    expect(rejected.state).toBe("rejected");
+    expect(f.store.mappedTransaction(rejected)).toBe("222");
+    expect(f.store.health().status).toBe("degraded");
+  });
 
-      charger.emit(
-        "message",
-        Buffer.from('[2,"start-1","StartTransaction",{"connectorId":1,"meterStart":0}]')
-      );
-      primarySocket.emit(
-        "message",
-        Buffer.from('[3,"start-1",{"transactionId":111,"idTagInfo":{"status":"Accepted"}}]')
-      );
-      secondarySocket.emit(
-        "message",
-        Buffer.from('[3,"start-1",{"transactionId":222,"idTagInfo":{"status":"Accepted"}}]')
-      );
+  it("does not send primary transaction IDs when a secondary binding is missing", () => {
+    const f = fixture();
+    send(f, "orphan", "MeterValues", { transactionId: 111 });
+    expect(f.secondary.sent).toEqual([]);
+    expect(f.store.inspect()[0].state).toBe("blocked");
+    f.store.bind(f.store.inspect()[0].id, "111", "222", "Both systems confirmed this active session");
+    f.secondary.emit("open");
+    expect(callAt(f.secondary)[3].transactionId).toBe(222);
+  });
 
-      charger.emit(
-        "message",
-        Buffer.from('[2,"stop-1","StopTransaction",{"transactionId":111,"meterStop":5}]')
-      );
-
-      const firstStop = JSON.parse(secondarySocket.sent[1]) as [
-        number,
-        string,
-        string,
-        Record<string, unknown>,
-      ];
-      expect(firstStop[3].transactionId).toBe(222);
-
-      // Unanswered, so it is resent — and must still carry the secondary's ID.
-      // Releasing the mapping when the frame was written would send the retry
-      // with the primary's ID instead.
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-      const retriedStop = JSON.parse(secondarySocket.sent[2]) as [
-        number,
-        string,
-        string,
-        Record<string, unknown>,
-      ];
-      expect(retriedStop[3].transactionId).toBe(222);
-
-      connection.teardown();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("continues primary control and reports degraded health on journal failure", () => {
+    const f = fixture();
+    vi.spyOn(f.store, "enqueue").mockImplementationOnce(() => { throw new Error("ENOSPC"); });
+    send(f, "heartbeat", "Heartbeat");
+    expect(callAt(f.primary)).toEqual([2, "heartbeat", "Heartbeat", {}]);
+    expect(f.secondary.sent).toEqual([]);
+    expect(f.store.health()).toMatchObject({ status: "degraded", storageError: "ENOSPC" });
   });
 });
